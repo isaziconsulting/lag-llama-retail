@@ -250,7 +250,7 @@ class LagLlamaLightningModule(LightningModule):
                 p[:, -1:] for p in params
             ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
             distr = self.model.distr_output.distribution(sliced_params, loc, scale)
-            sample = distr.sample()  # (#bsz*#parallel_samples, 1)
+            sample = distr.mean  # (#bsz*#parallel_samples, 1)
             if self.nonnegative_pred_samples:
                 sample = F.relu(sample)
             future_samples.append(sample)
