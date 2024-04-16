@@ -127,6 +127,7 @@ class LagLlamaLightningModule(LightningModule):
         self.nonnegative_pred_samples = self.hparams.nonnegative_pred_samples
 
         self.time_feat = self.hparams.model_kwargs["time_feat"]
+        self.num_feat_dynamic_real = self.hparams.model_kwargs["num_feat_dynamic_real"]
         # data_id based
         self.train_loss_dict = {}
         self.val_loss_dict = {}
@@ -217,6 +218,15 @@ class LagLlamaLightningModule(LightningModule):
             repeated_future_time_feat = future_time_feat.repeat_interleave(
                 self.model.num_parallel_samples, 0
             )
+        if self.num_feat_dynamic_real:
+            past_feat_dynamic_real = kwargs["past_feat_dynamic_real"]
+            future_feat_dynamic_real = kwargs["future_feat_dynamic_real"]
+            repeated_past_feat_dynamic_real = past_feat_dynamic_real.repeat_interleave(
+                self.model.num_parallel_samples, 0
+            )
+            repeated_future_feat_dynamic_real = future_feat_dynamic_real.repeat_interleave(
+                self.model.num_parallel_samples, 0
+            )
 
         repeated_past_target = past_target.repeat_interleave(
             self.model.num_parallel_samples, 0
@@ -227,24 +237,16 @@ class LagLlamaLightningModule(LightningModule):
 
         future_samples = []
         for t in range(self.prediction_length):
-            if self.time_feat:
-                params, loc, scale = self.model(
-                    *args,
-                    past_time_feat=repeated_past_time_feat,
-                    future_time_feat=repeated_future_time_feat[..., : t + 1, :],
-                    past_target=repeated_past_target,
-                    past_observed_values=repeated_past_observed_values,
-                    use_kv_cache=self.use_kv_cache,
-                )
-            else:
-                params, loc, scale = self.model(
-                    *args,
-                    past_time_feat=None,  # repeated_past_time_feat,
-                    future_time_feat=None,  # repeated_future_time_feat[..., : t + 1, :],
-                    past_target=repeated_past_target,
-                    past_observed_values=repeated_past_observed_values,
-                    use_kv_cache=self.use_kv_cache,
-                )
+            params, loc, scale = self.model(
+                *args,
+                past_time_feat=repeated_past_time_feat if self.time_feat else None,
+                future_time_feat=repeated_future_time_feat[..., : t + 1, :] if self.time_feat else None,
+                past_feat_dynamic_real=repeated_past_feat_dynamic_real if self.num_feat_dynamic_real else None,
+                future_feat_dynamic_real=repeated_future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
+                past_target=repeated_past_target,
+                past_observed_values=repeated_past_observed_values,
+                use_kv_cache=self.use_kv_cache,
+            )
 
             sliced_params = [
                 p[:, -1:] for p in params
@@ -286,6 +288,12 @@ class LagLlamaLightningModule(LightningModule):
         else:
             past_time_feat = None
             future_time_feat = None
+        if self.num_feat_dynamic_real:
+            past_feat_dynamic_real = batch["past_feat_dynamic_real"]
+            future_feat_dynamic_real = batch["future_feat_dynamic_real"]
+        else:
+            past_feat_dynamic_real = None
+            future_feat_dynamic_real = None
 
         extra_dims = len(future_target.shape) - len(past_target.shape)  # usually 0
         extra_shape = future_target.shape[:extra_dims]  # shape remains the same
@@ -312,6 +320,8 @@ class LagLlamaLightningModule(LightningModule):
             past_observed_values=past_observed_values,
             past_time_feat=past_time_feat,
             future_time_feat=future_time_feat,
+            past_feat_dynamic_real=past_feat_dynamic_real,
+            future_feat_dynamic_real=future_feat_dynamic_real,
             future_target=future_target_reshaped,
         )  # distr_args is a tuple with two tensors of shape (bsz, context_length+pred_len-1)
         context_target = take_last(

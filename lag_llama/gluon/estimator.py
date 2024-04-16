@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pytorch_lightning as pl
 import torch
@@ -23,11 +23,12 @@ from gluonts.transform import (
     Chain,
     DummyValueImputation,
     ExpectedNumInstanceSampler,
+    RemoveFields,
     InstanceSampler,
     InstanceSplitter,
     TestSplitSampler,
     Transformation,
-    ValidationSplitSampler,
+    ValidationSplitSampler
 )
 
 from gluon_utils.gluon_ts_distributions.implicit_quantile_network import (
@@ -38,6 +39,10 @@ from lag_llama.gluon.lightning_module import LagLlamaLightningModule
 PREDICTION_INPUT_NAMES = [
     "past_target",
     "past_observed_values",
+    "past_time_feat",
+    "future_time_feat",
+    "past_feat_dynamic_real",
+    "future_feat_dynamic_real"
 ]
 TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
     "future_target",
@@ -133,6 +138,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         time_feat: bool = False,
+        num_feat_dynamic_real: int = 0,
         dropout: float = 0.0,
         lags_seq: list = ["Q", "M", "W", "D", "H", "T", "S"],
         data_id_to_name_map: dict = {},
@@ -220,6 +226,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         self.track_loss_per_series = track_loss_per_series
 
         self.time_feat = time_feat
+        self.num_feat_dynamic_real = num_feat_dynamic_real
         self.dropout = dropout
         self.data_id_to_name_map = data_id_to_name_map
         self.ckpt_path = ckpt_path
@@ -238,34 +245,43 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             "cardinality": [len(cats) for cats in stats.feat_static_cat],
         }
 
+    def input_names(self, training=True):
+        input_names = list(TRAINING_INPUT_NAMES if training else PREDICTION_INPUT_NAMES) 
+
+        if not self.time_feat:
+            input_names.remove("past_time_feat")
+            input_names.remove("future_time_feat")
+        if not self.num_feat_dynamic_real:
+            input_names.remove("past_feat_dynamic_real")
+            input_names.remove("future_feat_dynamic_real")
+
+        return input_names
+    
     def create_transformation(self) -> Transformation:
+        remove_field_names = []
+        if not self.num_feat_dynamic_real:
+            remove_field_names.append(FieldName.FEAT_DYNAMIC_REAL)
+        transforms = []
+        if len(remove_field_names):
+            transforms.append(RemoveFields(field_names=remove_field_names))
         if self.time_feat:
-            return Chain(
-                [
-                    AddTimeFeatures(
-                        start_field=FieldName.START,
-                        target_field=FieldName.TARGET,
-                        output_field=FieldName.FEAT_TIME,
-                        time_features=time_features_from_frequency_str("S"),
-                        pred_length=self.prediction_length,
-                    ),
-                    AddObservedValuesIndicator(
-                        target_field=FieldName.TARGET,
-                        output_field=FieldName.OBSERVED_VALUES,
-                        imputation_method=DummyValueImputation(0.0),
-                    ),
-                ]
+            transforms.append(
+                AddTimeFeatures(
+                    start_field=FieldName.START,
+                    target_field=FieldName.TARGET,
+                    output_field=FieldName.FEAT_TIME,
+                    time_features=time_features_from_frequency_str("S"),
+                    pred_length=self.prediction_length,
+                )
             )
-        else:
-            return Chain(
-                [
-                    AddObservedValuesIndicator(
-                        target_field=FieldName.TARGET,
-                        output_field=FieldName.OBSERVED_VALUES,
-                        imputation_method=DummyValueImputation(0.0),
-                    ),
-                ]
-            )
+
+        transforms.append(AddObservedValuesIndicator(
+            target_field=FieldName.TARGET,
+            output_field=FieldName.OBSERVED_VALUES,
+            imputation_method=DummyValueImputation(0.0),
+        ))
+
+        return Chain(transforms)
 
     def create_lightning_module(self, use_kv_cache: bool = False) -> pl.LightningModule:
         model_kwargs = {
@@ -281,6 +297,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             "num_parallel_samples": self.num_parallel_samples,
             "rope_scaling": self.rope_scaling,
             "time_feat": self.time_feat,
+            "num_feat_dynamic_real": self.num_feat_dynamic_real,
             "dropout": self.dropout,
         }
         if self.ckpt_path is not None:
@@ -372,6 +389,12 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             "test": TestSplitSampler(),
         }[mode]
 
+
+        ts_fields = [FieldName.OBSERVED_VALUES]
+        if self.time_feat:
+            ts_fields.append(FieldName.FEAT_TIME)
+        if self.num_feat_dynamic_real:
+            ts_fields.append(FieldName.FEAT_DYNAMIC_REAL)
         return InstanceSplitter(
             target_field=FieldName.TARGET,
             is_pad_field=FieldName.IS_PAD,
@@ -380,9 +403,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             instance_sampler=instance_sampler,
             past_length=self.context_length + max(self.lags_seq),
             future_length=self.prediction_length,
-            time_series_fields=[FieldName.FEAT_TIME, FieldName.OBSERVED_VALUES]
-            if self.time_feat
-            else [FieldName.OBSERVED_VALUES],
+            time_series_fields=ts_fields,
             dummy_value=self.distr_output.value_in_support,
         )
 
@@ -397,26 +418,14 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
-        if self.time_feat:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                shuffle_buffer_length=shuffle_buffer_length,
-                field_names=TRAINING_INPUT_NAMES
-                + ["past_time_feat", "future_time_feat"],
-                output_type=torch.tensor,
-                num_batches_per_epoch=self.num_batches_per_epoch,
-            )
-
-        else:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                shuffle_buffer_length=shuffle_buffer_length,
-                field_names=TRAINING_INPUT_NAMES,
-                output_type=torch.tensor,
-                num_batches_per_epoch=self.num_batches_per_epoch,
-            )
+        return as_stacked_batches(
+            instances,
+            batch_size=self.batch_size,
+            shuffle_buffer_length=shuffle_buffer_length,
+            field_names=self.input_names(),
+            output_type=torch.tensor,
+            num_batches_per_epoch=self.num_batches_per_epoch,
+        )
 
     def create_validation_data_loader(
         self,
@@ -427,21 +436,12 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
-        if self.time_feat:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                field_names=TRAINING_INPUT_NAMES
-                + ["past_time_feat", "future_time_feat"],
-                output_type=torch.tensor,
-            )
-        else:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                field_names=TRAINING_INPUT_NAMES,
-                output_type=torch.tensor,
-            )
+        return as_stacked_batches(
+            instances,
+            batch_size=self.batch_size,
+            field_names=self.input_names(),
+            output_type=torch.tensor,
+        )
 
     def create_predictor(
         self,
@@ -449,22 +449,11 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         module,
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
-        if self.time_feat:
-            return PyTorchPredictor(
-                input_transform=transformation + prediction_splitter,
-                input_names=PREDICTION_INPUT_NAMES
-                + ["past_time_feat", "future_time_feat"],
-                prediction_net=module,
-                batch_size=self.batch_size,
-                prediction_length=self.prediction_length,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
-        else:
-            return PyTorchPredictor(
-                input_transform=transformation + prediction_splitter,
-                input_names=PREDICTION_INPUT_NAMES,
-                prediction_net=module,
-                batch_size=self.batch_size,
-                prediction_length=self.prediction_length,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
+        return PyTorchPredictor(
+            input_transform=transformation + prediction_splitter,
+            input_names=self.input_names(training=False),
+            prediction_net=module,
+            batch_size=self.batch_size,
+            prediction_length=self.prediction_length,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )

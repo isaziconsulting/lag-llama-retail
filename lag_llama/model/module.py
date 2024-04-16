@@ -394,15 +394,14 @@ class LagLlamaModel(nn.Module):
         rope_scaling=None,
         num_parallel_samples: int = 100,
         time_feat: bool = True,
+        num_feat_dynamic_real: int = True,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.context_length = context_length
         self.lags_seq = lags_seq
-        if time_feat:
-            feature_size = input_size * (len(self.lags_seq)) + 2 * input_size + 6
-        else:
-            feature_size = input_size * (len(self.lags_seq)) + 2 * input_size
+        num_time_dims = 6 if time_feat else 0
+        feature_size = input_size * (len(self.lags_seq)) + 2 * input_size + num_time_dims + num_feat_dynamic_real
 
         config = LTSMConfig(
             n_layer=n_layer,
@@ -456,6 +455,8 @@ class LagLlamaModel(nn.Module):
         past_observed_values: torch.Tensor,
         past_time_feat: Optional[torch.Tensor] = None,
         future_time_feat: Optional[torch.Tensor] = None,
+        past_feat_dynamic_real: Optional[torch.Tensor] = None,
+        future_feat_dynamic_real: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
     ):
         scaled_past_target, loc, scale = self.scaler(
@@ -487,6 +488,19 @@ class LagLlamaModel(nn.Module):
                 else past_time_feat[..., max(self.lags_seq) :, :]
             )
 
+        if past_feat_dynamic_real is not None:
+            feat_dynamic_real = (
+                torch.cat(
+                    (
+                        past_feat_dynamic_real[..., max(self.lags_seq) :, :],
+                        future_feat_dynamic_real[..., :-1, :],
+                    ),
+                    dim=1,
+                )
+                if future_feat_dynamic_real is not None
+                else past_feat_dynamic_real[..., max(self.lags_seq) :, :]
+            )
+
         prior_input = (
             past_target[..., : max(self.lags_seq)] - loc
         ) / scale  # This the history used to construct lags.  # bsz, max(self.lags_seq)
@@ -503,14 +517,13 @@ class LagLlamaModel(nn.Module):
         )  # (bsz, context_length+(pred_len-1), 2)
         # expanded_static_feat: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
 
+        feature_list = [lags, expanded_static_feat]
         if past_time_feat is not None:
-            return (
-                torch.cat((lags, expanded_static_feat, time_feat), dim=-1),
-                loc,
-                scale,
-            )
-        else:
-            return torch.cat((lags, expanded_static_feat), dim=-1), loc, scale
+            feature_list.append(time_feat)
+        if past_feat_dynamic_real is not None:
+            feature_list.append(feat_dynamic_real)
+
+        return torch.cat(feature_list, dim=-1), loc, scale
 
     def forward(
         self,
@@ -518,6 +531,8 @@ class LagLlamaModel(nn.Module):
         past_observed_values: torch.Tensor,
         past_time_feat: Optional[torch.Tensor] = None,
         future_time_feat: Optional[torch.Tensor] = None,
+        past_feat_dynamic_real: Optional[torch.Tensor] = None,
+        future_feat_dynamic_real: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
         use_kv_cache: bool = False,
     ) -> torch.Tensor:
@@ -528,6 +543,8 @@ class LagLlamaModel(nn.Module):
             future_target=future_target,
             past_time_feat=past_time_feat,
             future_time_feat=future_time_feat,
+            past_feat_dynamic_real=past_feat_dynamic_real,
+            future_feat_dynamic_real=future_feat_dynamic_real,
         )  # return: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
         # To use kv cache for inference and pass recent token to transformer
         if use_kv_cache and self.y_cache:
