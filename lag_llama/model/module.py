@@ -400,7 +400,7 @@ class LagLlamaModel(nn.Module):
         super().__init__()
         self.context_length = context_length
         self.lags_seq = lags_seq
-        num_time_dims = 6 if time_feat else 0
+        num_time_dims = 3 if time_feat else 0
         feature_size = input_size * (len(self.lags_seq)) + 2 * input_size + num_time_dims + num_feat_dynamic_real
 
         config = LTSMConfig(

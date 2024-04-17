@@ -270,7 +270,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                     start_field=FieldName.START,
                     target_field=FieldName.TARGET,
                     output_field=FieldName.FEAT_TIME,
-                    time_features=time_features_from_frequency_str("S"),
+                    time_features=time_features_from_frequency_str("1D"),
                     pred_length=self.prediction_length,
                 )
             )
