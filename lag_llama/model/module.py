@@ -489,30 +489,30 @@ class LagLlamaModel(nn.Module):
             )  # Shape is (bsz, context_length+(pred_len-1))
         else:
             input = scaled_past_target[..., max(self.lags_seq) :]
-        if (past_time_feat is not None) and (future_time_feat is not None):
+        if past_time_feat is not None:
             time_feat = (
                 torch.cat(
                     (
-                        past_time_feat[..., max(self.lags_seq) :, :],
-                        future_time_feat[..., :-1, :],
+                        past_time_feat[..., max(self.lags_seq) + 1:, :],
+                        future_time_feat,
                     ),
                     dim=1,
                 )
                 if future_time_feat is not None
-                else past_time_feat[..., max(self.lags_seq) :, :]
+                else past_time_feat[..., max(self.lags_seq) + 1:, :]
             )
 
         if past_feat_dynamic_real is not None:
             feat_dynamic_real = (
                 torch.cat(
                     (
-                        past_feat_dynamic_real[..., max(self.lags_seq) :, :],
-                        future_feat_dynamic_real[..., :-1, :],
+                        past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :],
+                        future_feat_dynamic_real,
                     ),
                     dim=1,
                 )
                 if future_feat_dynamic_real is not None
-                else past_feat_dynamic_real[..., max(self.lags_seq) :, :]
+                else past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
             )
 
         prior_input = (
