@@ -173,18 +173,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         self.prediction_length = prediction_length
         self.context_length = context_length
         self.max_context_length = max_context_length
-
-        lag_indices = []
-        for freq in lags_seq:
-            lag_indices.extend(
-                get_lags_for_frequency(freq_str=freq, num_default_lags=1)
-            )
-
-        if len(lag_indices):
-            self.lags_seq = sorted(set(lag_indices))
-            self.lags_seq = [lag_index - 1 for lag_index in self.lags_seq]
-        else:
-            self.lags_seq = []
+        self.lags_seq = compute_lag_indices(lags_seq)
 
         self.n_head = n_head
         self.n_layer = n_layer
@@ -471,3 +460,30 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             prediction_length=self.prediction_length,
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
+
+def compute_lag_indices(lags_seq):
+    """
+    Computes and returns the adjusted lag indices from a sequence of integers or frequency strings.
+    If `lags_seq` contains integers, they are treated as direct lag indices which are then adjusted.
+    If `lags_seq` contains strings, they are assumed to be frequency identifiers from which lag indices
+    are derived using the GluonTS function `get_lags_for_frequency`.
+
+    Parameters:
+    lags_seq (list of int or str): A list of integers representing lag indices or strings representing frequencies.
+
+    Returns:
+    list of int: A sorted and adjusted list of unique lag indices.
+    """
+    if all(isinstance(lag, int) for lag in lags_seq):  # Check if all elements are integers (indices)
+        return [lag - 1 for lag in sorted(set(lags_seq))]  # Adjust indices and return
+
+    lag_indices = []
+    for freq in lags_seq:
+        lag_indices.extend(
+            get_lags_for_frequency(freq_str=freq, num_default_lags=1)
+        )
+
+    if lag_indices:
+        return [lag_index - 1 for lag_index in sorted(set(lag_indices))]
+    else:
+        return []
