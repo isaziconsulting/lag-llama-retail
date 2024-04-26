@@ -475,9 +475,9 @@ def compute_lag_indices(lags_seq):
     list of int: A sorted and adjusted list of unique lag indices.
     """
     if all(isinstance(lag, int) for lag in lags_seq):  # Check if all elements are integers (indices)
-        return [lag - 1 for lag in sorted(set(lags_seq))]  # Adjust indices and return
+        return sorted(set(lags_seq))  # Remove duplicate indices and sort
 
-    lag_indices = []
+    lag_indices = [] # Otherwise compute lag indices from frequency strings
     for freq in lags_seq:
         lag_indices.extend(
             get_lags_for_frequency(freq_str=freq, num_default_lags=1)
