@@ -160,6 +160,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         cosine_annealing_lr_args: dict = {},
         track_loss_per_series: bool = False,
         ckpt_path: Optional[str] = None,
+        partial_weights_ckpt_path: Optional[str] = None,
         nonnegative_pred_samples: bool = False,
         device: torch.device = torch.device("cuda")
     ) -> None:
@@ -232,7 +233,10 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.dropout = dropout
         self.data_id_to_name_map = data_id_to_name_map
+        # Cannot set both a full checkpoint and partial weights checkpoint
+        assert ckpt_path is None or partial_weights_ckpt_path is None
         self.ckpt_path = ckpt_path
+        self.partial_weights_ckpt_path = partial_weights_ckpt_path
 
         self.use_cosine_annealing_lr = use_cosine_annealing_lr
         self.cosine_annealing_lr_args = cosine_annealing_lr_args
@@ -345,7 +349,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 nonnegative_pred_samples=self.nonnegative_pred_samples,
             )
         else:
-            return LagLlamaLightningModule(
+            lightning_module = LagLlamaLightningModule(
                 loss=self.loss,
                 lr=self.lr,
                 weight_decay=self.weight_decay,
@@ -382,6 +386,12 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 track_loss_per_series=self.track_loss_per_series,
                 nonnegative_pred_samples=self.nonnegative_pred_samples,
             )
+
+            if self.partial_weights_ckpt_path is not None:
+                lightning_module.model.load_partial_weights(self.partial_weights_ckpt_path)
+
+            return lightning_module                
+
 
     def _create_instance_splitter(self, module: LagLlamaLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]

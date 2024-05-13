@@ -483,6 +483,11 @@ class LagLlamaModel(nn.Module):
                 module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer)
             )
 
+    def load_partial_weights(self, partial_weights_ckpt_path) -> None:
+        checkpoint = torch.load(partial_weights_ckpt_path)
+        filtered_state_dict = {k: v for k, v in checkpoint['state_dict'].items() if 'transformer.h' in k or 'transformer.ln_f' in k}
+        self.transformer.load_state_dict(filtered_state_dict, strict=False)
+
     def prepare_input(
         self,
         past_target: torch.Tensor,
