@@ -284,7 +284,7 @@ class LagLlamaLightningModule(LightningModule):
         )
 
     # train
-    def _compute_loss(self, batch, do_not_average=False, return_observed_values=False):
+    def _compute_loss(self, batch, do_not_average=False, return_observed_values=False, validating=False):
         past_target = batch[
             "past_target"
         ]  # (bsz, model.context_length+max(model.lags_seq))
@@ -347,6 +347,12 @@ class LagLlamaLightningModule(LightningModule):
         context_observed = take_last(
             past_observed_values, dim=-1, num=self.context_length - 1
         )  # same as context_target, but for observed_values tensor
+
+        # If we are validating, ignore the context window when computing loss by marking it not observed
+        # As the context window will overlap into the training set
+        if validating:
+            context_observed = torch.zeros_like(context_observed)
+
         observed_values = torch.cat(
             (context_observed, future_observed_reshaped), dim=1
         )  # same as target but for observed_values tensor
@@ -447,7 +453,7 @@ class LagLlamaLightningModule(LightningModule):
         Execute validation step.
         """
         val_loss_per_sample, observed_values = self._compute_loss(
-            batch, do_not_average=True, return_observed_values=True
+            batch, do_not_average=True, return_observed_values=True, validating=True
         )
 
         val_loss_avg = val_loss_per_sample.sum() / observed_values.sum().clamp_min(1.0)
