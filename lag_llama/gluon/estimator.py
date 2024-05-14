@@ -388,10 +388,9 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             )
 
             if self.partial_weights_ckpt_path is not None:
-                lightning_module.model.load_partial_weights(self.partial_weights_ckpt_path)
+                lightning_module.model.load_partial_weights(self.partial_weights_ckpt_path, self.device)
 
             return lightning_module                
-
 
     def _create_instance_splitter(self, module: LagLlamaLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]

@@ -473,7 +473,7 @@ class LagLlamaModel(nn.Module):
         )
         self.y_cache = False  # used at time of inference when kv cached is used
 
-    def _init_weights(self, module: nn.Module) -> None:
+    def _init_weights(self, module: nn.Module) -> None:            
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(
                 module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer)
@@ -483,10 +483,12 @@ class LagLlamaModel(nn.Module):
                 module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer)
             )
 
-    def load_partial_weights(self, partial_weights_ckpt_path) -> None:
-        checkpoint = torch.load(partial_weights_ckpt_path)
+    def load_partial_weights(self, partial_weights_ckpt_path, device) -> None:
+        checkpoint = torch.load(partial_weights_ckpt_path, device)
         filtered_state_dict = {k: v for k, v in checkpoint['state_dict'].items() if 'transformer.h' in k or 'transformer.ln_f' in k}
-        self.transformer.load_state_dict(filtered_state_dict, strict=False)
+        # Remove the 'model.' prefix from the keys and filter only the transformer `h` and distribution head `ln_f` layers
+        filtered_state_dict = {k.replace('model.transformer.', 'transformer.'): v for k, v in checkpoint['state_dict'].items() if 'transformer.h' in k or 'transformer.ln_f' in k}
+        self.load_state_dict(filtered_state_dict, strict=False)
 
     def prepare_input(
         self,
