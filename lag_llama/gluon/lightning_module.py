@@ -102,6 +102,7 @@ class LagLlamaLightningModule(LightningModule):
         track_loss_per_series: bool = False,
         nonnegative_pred_samples: bool = False,
         use_kv_cache: bool = True,
+        model_config=None
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -138,6 +139,7 @@ class LagLlamaLightningModule(LightningModule):
         self.cosine_annealing_lr_args = self.hparams.cosine_annealing_lr_args
         self.track_loss_per_series = self.hparams.track_loss_per_series
         self.nonnegative_pred_samples = self.hparams.nonnegative_pred_samples
+        self.model_config = model_config
 
         self.time_feat = self.hparams.model_kwargs["time_feat"]
         self.num_feat_dynamic_real = self.hparams.model_kwargs["num_feat_dynamic_real"]
