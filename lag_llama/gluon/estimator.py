@@ -471,7 +471,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             prediction_net=module,
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            device=self.device,
         )
 
 def compute_lag_indices(lags_seq):
