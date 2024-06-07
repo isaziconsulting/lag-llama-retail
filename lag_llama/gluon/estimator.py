@@ -161,6 +161,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         track_loss_per_series: bool = False,
         ckpt_path: Optional[str] = None,
         partial_weights_ckpt_path: Optional[str] = None,
+        freeze_transformer: bool = False,
         nonnegative_pred_samples: bool = False,
         device: torch.device = torch.device("cuda"),
         model_config=None,
@@ -239,6 +240,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         assert ckpt_path is None or partial_weights_ckpt_path is None
         self.ckpt_path = ckpt_path
         self.partial_weights_ckpt_path = partial_weights_ckpt_path
+        self.freeze_transformer = freeze_transformer
 
         self.use_cosine_annealing_lr = use_cosine_annealing_lr
         self.cosine_annealing_lr_args = cosine_annealing_lr_args
@@ -396,7 +398,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             )
 
             if self.partial_weights_ckpt_path is not None:
-                lightning_module.model.load_partial_weights(self.partial_weights_ckpt_path, self.device)
+                lightning_module.model.load_partial_weights(self.partial_weights_ckpt_path, self.device, self.freeze_transformer)
 
             return lightning_module                
 

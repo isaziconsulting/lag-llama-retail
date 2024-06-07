@@ -482,13 +482,19 @@ class LagLlamaModel(nn.Module):
                 module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer)
             )
 
-    def load_partial_weights(self, partial_weights_ckpt_path, device) -> None:
+    def load_partial_weights(self, partial_weights_ckpt_path, device, freeze_transformer=False) -> None:
         checkpoint = torch.load(partial_weights_ckpt_path, device)
         filtered_state_dict = {k: v for k, v in checkpoint['state_dict'].items() if 'transformer.h' in k or 'transformer.ln_f' in k}
         # Remove the 'model.' prefix from the keys and filter only the transformer layers (excluding embedding layers) and distribution head layer
         valid_keys = ['transformer.h', 'transformer.ln_f', 'param_proj']
         filtered_state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items() if any(substring in k for substring in valid_keys)}
         self.load_state_dict(filtered_state_dict, strict=False)
+
+        if freeze_transformer:
+            # Freeze the transform layers that were loaded
+            for name, param in self.named_parameters():
+                if 'transformer.h' in name or 'transformer.ln_f' in name:
+                    param.requires_grad = False
 
     def prepare_input(
         self,
