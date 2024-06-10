@@ -469,7 +469,8 @@ class LagLlamaLightningModule(LightningModule):
 
         preds = preds * observed_values
         target = target * observed_values
-        return torch.sum(torch.abs(preds - target))/torch.sum(target)
+        rE = torch.sum(torch.abs(preds - target))/torch.sum(target) if torch.sum(target) > 0 else 0
+        return rE
 
     def training_step(self, batch, batch_idx: int):  # type: ignore
         """
