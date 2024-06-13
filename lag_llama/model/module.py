@@ -309,8 +309,16 @@ class CausalSelfAttention(nn.Module):
         )  # (B, nh, T, hs)
 
         if self.rotary_emb is not None:
-            cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T)
-            q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids=None)
+            T_true = k.size(2)
+            if use_kv_cache and T < T_true:
+                cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T_true)
+                q, _ = apply_rotary_pos_emb(q, k, cos, sin, position_ids=[-1])
+                
+                cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T_true)
+                _, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids=None)
+            else:
+                cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T)
+                q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids=None)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         #  att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -321,9 +329,20 @@ class CausalSelfAttention(nn.Module):
         # efficient attention using Flash Attention CUDA kernels
         # When using kv cache at inference, is_causal=False since decoder is causal, at each generation step we want
         # to avoid recalculating the same previous token attention
+
+        # Generate the mask
+        mask = torch.nn.Transformer.generate_square_subsequent_mask(sz=T)
+
+        # Since generate_square_subsequent_mask gives you a (seq_length, seq_length) mask,
+        # You need to adjust the mask to fit the dimensions expected by the attention function:
+        # (batch_size, num_heads, seq_length, seq_length)
+        true_seq_len = k.shape[2]
+        mask = mask.unsqueeze(0).unsqueeze(0)  # Add dimensions for batch and head
+        mask = mask.expand(B, self.n_head, T, true_seq_len)  # Expand to cover all batches and heads
+
         if use_kv_cache:
             y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=False
+                q, k, v, attn_mask=mask, dropout_p=self.dropout
             )
         else:
             y = F.scaled_dot_product_attention(
@@ -630,6 +649,6 @@ class LagLlamaModel(nn.Module):
         Resets all cached key-values in attention.
         Has to be called after prediction loop in predictor
         """
+        self.y_cache = False 
         for block in self.transformer.h:
-            block.y_cache = None
             block.attn.kv_cache = None
