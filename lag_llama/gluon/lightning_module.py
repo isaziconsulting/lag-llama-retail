@@ -428,16 +428,6 @@ class LagLlamaLightningModule(LightningModule):
             *future_observed_values.shape[extra_dims + 1 :],
         )  # (bsz, model.prediction_length)
 
-        # distr_args, loc, scale = self.model(
-        #     past_target=past_target,
-        #     past_observed_values=past_observed_values,
-        #     past_time_feat=past_time_feat,
-        #     future_time_feat=future_time_feat,
-        #     past_feat_dynamic_real=past_feat_dynamic_real,
-        #     future_feat_dynamic_real=future_feat_dynamic_real,
-        #     future_target=future_target_reshaped,
-        # )  # distr_args is a tuple with two tensors of shape (bsz, context_length+pred_len-1)
-
         target = future_target_reshaped
         observed_values = future_observed_reshaped
         preds = torch.zeros_like(target)
@@ -449,7 +439,7 @@ class LagLlamaLightningModule(LightningModule):
                 future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
                 past_target=past_target,
                 past_observed_values=past_observed_values,
-                use_kv_cache=self.use_kv_cache,
+                use_kv_cache=True,
             )
 
             distr_args = [
