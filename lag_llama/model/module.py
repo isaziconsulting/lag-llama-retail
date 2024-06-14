@@ -308,8 +308,8 @@ class CausalSelfAttention(nn.Module):
             1, 2
         )  # (B, nh, T, hs)
 
+        T_true = k.size(2)
         if self.rotary_emb is not None:
-            T_true = k.size(2)
             if use_kv_cache and T < T_true:
                 cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T_true)
                 q, _ = apply_rotary_pos_emb(q, k, cos, sin, position_ids=[-1])
@@ -331,14 +331,13 @@ class CausalSelfAttention(nn.Module):
         # to avoid recalculating the same previous token attention
 
         # Generate the mask
-        mask = torch.nn.Transformer.generate_square_subsequent_mask(sz=T, device=v.device)
+        mask = torch.nn.Transformer.generate_square_subsequent_mask(sz=T)
 
         # Since generate_square_subsequent_mask gives you a (seq_length, seq_length) mask,
         # You need to adjust the mask to fit the dimensions expected by the attention function:
         # (batch_size, num_heads, seq_length, seq_length)
-        true_seq_len = k.shape[2]
         mask = mask.unsqueeze(0).unsqueeze(0)  # Add dimensions for batch and head
-        mask = mask.expand(B, self.n_head, T, true_seq_len)  # Expand to cover all batches and heads
+        mask = mask.expand(B, self.n_head, T, T_true)  # Expand to cover all batches and heads
 
         if use_kv_cache:
             y = F.scaled_dot_product_attention(
@@ -346,7 +345,7 @@ class CausalSelfAttention(nn.Module):
             )
         else:
             y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True
+                q, k, v, attn_mask=mask, dropout_p=self.dropout
             )
 
         # re-assemble all head outputs side by side
