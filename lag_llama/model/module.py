@@ -331,7 +331,7 @@ class CausalSelfAttention(nn.Module):
         # to avoid recalculating the same previous token attention
 
         # Generate the mask
-        mask = torch.nn.Transformer.generate_square_subsequent_mask(sz=T)
+        mask = torch.nn.Transformer.generate_square_subsequent_mask(sz=T, device=v.device)
 
         # Since generate_square_subsequent_mask gives you a (seq_length, seq_length) mask,
         # You need to adjust the mask to fit the dimensions expected by the attention function:
