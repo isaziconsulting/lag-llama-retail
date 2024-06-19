@@ -428,6 +428,7 @@ class LagLlamaModel(nn.Module):
         self.num_feat_dynamic_real = num_feat_dynamic_real
 
         feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real
+        num_embed_dims = n_embd_per_head * n_head
 
         config = LTSMConfig(
             n_layer=n_layer,
@@ -451,33 +452,14 @@ class LagLlamaModel(nn.Module):
 
         self.distr_output = distr_output
         self.param_proj = self.distr_output.get_args_proj(
-            config.n_embd_per_head * config.n_head
+            num_embed_dims
         )
-
-        # Input layers
-        time_embed_capacity = 0.1 # Amount of embedding dimensions allocated to time features
-        feat_dyn_embed_capacity = 0.1 # Amount of embedding dimensions allocated to other dynamic features
-
-        num_embed_dims = config.n_embd_per_head * config.n_head
-        num_time_embed_dims = math.floor(num_embed_dims * time_embed_capacity)
-        num_feat_dyn_embed_dims = math.floor(num_embed_dims * feat_dyn_embed_capacity)
-        # Rest of the embedding are given to the lagged targets
-        num_lag_embed_dims = num_embed_dims - num_time_embed_dims - num_feat_dyn_embed_dims
-
-        # self.embed_lags = nn.Linear(self.num_lag_dims, num_lag_embed_dims)
-        # self.embed_time = nn.Linear(self.num_time_dims, num_time_embed_dims)
-        # self.embed_dynamic_real = nn.Linear(num_feat_dynamic_real, num_feat_dyn_embed_dims)
-        # self.interaction_layer = nn.Linear(num_embed_dims, num_embed_dims)
-
 
         self.transformer = nn.ModuleDict(
             dict(
-                embed_lags = nn.Linear(self.num_lag_dims, num_lag_embed_dims),
-                embed_time = nn.Linear(self.num_time_dims, num_time_embed_dims),
-                embed_dynamic_real = nn.Linear(num_feat_dynamic_real, num_feat_dyn_embed_dims),
-                interaction_layer = nn.Linear(num_embed_dims, num_embed_dims),
+                wte = nn.Linear(feature_size, num_embed_dims),
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                ln_f=RMSNorm(config.n_embd_per_head * config.n_head),
+                ln_f=RMSNorm(num_embed_dims),
             )
         )
         self.y_cache = False  # used at time of inference when kv cached is used
@@ -613,21 +595,10 @@ class LagLlamaModel(nn.Module):
             # Only use the most recent one, rest is in cache
             transformer_input = transformer_input[:, -1:]
 
-        # Embedding each type of input
-        lags_emb = self.transformer.embed_lags(transformer_input[..., :self.num_lag_dims])
-        time_emb = self.transformer.embed_time(transformer_input[..., self.num_lag_dims: self.num_lag_dims + self.num_time_dims])
-        dynamic_emb = self.transformer.embed_dynamic_real(transformer_input[..., -self.num_feat_dynamic_real:])
-
-        # Concatenate all embeddings
-        x_concat = torch.cat([lags_emb, time_emb, dynamic_emb], dim=-1)
-
-        # Apply interaction layer
-        x = self.transformer.interaction_layer(x_concat)
-
-        # # forward the LLaMA model itself
-        # x = self.transformer.wte(
-        #     transformer_input
-        # )  # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
+        # Get token embeddings
+        x = self.transformer.wte(
+            transformer_input
+        )  # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
 
         for block in self.transformer.h:
             x = block(x, use_kv_cache)
