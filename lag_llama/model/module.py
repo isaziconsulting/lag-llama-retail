@@ -545,16 +545,22 @@ class LagLlamaModel(nn.Module):
             )
 
         if past_feat_dynamic_real is not None:
-            feat_dynamic_real = (
+            past_observed_feats = past_observed_values[..., :past_feat_dynamic_real.size(1)].unsqueeze(-1)
+            past_observed_feats = past_observed_feats.expand(-1, -1, past_feat_dynamic_real.size(-1))
+            scaled_past_feat_dynamic_real, feat_loc, feat_scale = self.scaler(
+                past_feat_dynamic_real, past_observed_feats
+            )
+            scaled_feat_dynamic_real = (
                 torch.cat(
                     (
-                        past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :],
-                        future_feat_dynamic_real,
+                        scaled_past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :],
+                        (future_feat_dynamic_real - feat_loc)
+                        / feat_scale,
                     ),
                     dim=1,
                 )
                 if future_feat_dynamic_real is not None
-                else past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
+                else scaled_past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
             )
 
         prior_input = (
@@ -577,7 +583,7 @@ class LagLlamaModel(nn.Module):
         if past_time_feat is not None:
             feature_list.append(time_feat)
         if past_feat_dynamic_real is not None:
-            feature_list.append(feat_dynamic_real)
+            feature_list.append(scaled_feat_dynamic_real)
 
         return torch.cat(feature_list, dim=-1), loc, scale
 
