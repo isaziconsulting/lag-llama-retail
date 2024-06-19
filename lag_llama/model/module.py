@@ -287,9 +287,10 @@ class CausalSelfAttention(nn.Module):
         q = self.q_proj(x)
         k, v = self.kv_proj(x).split(self.n_embd_per_head * self.n_head, dim=2)
 
+        cache_initialized = self.kv_cache is not None
         if use_kv_cache:
             # Optimized for single next prediction
-            if self.kv_cache is not None:
+            if cache_initialized:
                 # Update cache
                 k = torch.cat([self.kv_cache[0], k], dim=1)[:, 1:]
                 v = torch.cat([self.kv_cache[1], v], dim=1)[:, 1:]
@@ -310,7 +311,7 @@ class CausalSelfAttention(nn.Module):
 
         T_true = k.size(2)
         if self.rotary_emb is not None:
-            if use_kv_cache and T < T_true:
+            if use_kv_cache and cache_initialized:
                 cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T_true)
                 q, _ = apply_rotary_pos_emb(q, k, cos, sin, position_ids=[-1])
                 
@@ -330,22 +331,13 @@ class CausalSelfAttention(nn.Module):
         # When using kv cache at inference, is_causal=False since decoder is causal, at each generation step we want
         # to avoid recalculating the same previous token attention
 
-        # Generate the mask
-        mask = torch.nn.Transformer.generate_square_subsequent_mask(sz=T, device=v.device)
-
-        # Since generate_square_subsequent_mask gives you a (seq_length, seq_length) mask,
-        # You need to adjust the mask to fit the dimensions expected by the attention function:
-        # (batch_size, num_heads, seq_length, seq_length)
-        mask = mask.unsqueeze(0).unsqueeze(0)  # Add dimensions for batch and head
-        mask = mask.expand(B, self.n_head, T, T_true)  # Expand to cover all batches and heads
-
-        if use_kv_cache:
+        if use_kv_cache and cache_initialized:
             y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=self.dropout
+                q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=False
             )
         else:
             y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=self.dropout
+                q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True
             )
 
         # re-assemble all head outputs side by side
