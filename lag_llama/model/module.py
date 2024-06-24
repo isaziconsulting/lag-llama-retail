@@ -15,7 +15,6 @@
 import math
 from dataclasses import dataclass
 from typing import List, Optional
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -402,6 +401,24 @@ class RMSNorm(nn.Module):
         return (self.scale * x_normed).type_as(x)
 
 
+def encode_feat_static_cat(feat_static_cat, static_cardinalities):
+    batch_size, num_static_features = feat_static_cat.shape
+    encoded_features = []
+
+    for i in range(num_static_features):
+        # Get the cardinality of the current feature
+        cardinality = static_cardinalities[i]
+        # One-hot encode the feature
+        one_hot_encoded = torch.nn.functional.one_hot(feat_static_cat[:, i].long(), num_classes=cardinality)
+        # Append to the list of encoded features
+        encoded_features.append(one_hot_encoded)
+
+    # Concatenate all encoded features along the last dimension
+    feat_static_cat_encoded = torch.cat(encoded_features, dim=-1)
+
+    return feat_static_cat_encoded
+
+
 class LagLlamaModel(nn.Module):
     def __init__(
         self,
@@ -417,7 +434,9 @@ class LagLlamaModel(nn.Module):
         rope_scaling=None,
         num_parallel_samples: int = 100,
         time_feat: bool = True,
-        num_feat_dynamic_real: int = True,
+        num_feat_dynamic_real: int = 0,
+        num_feat_static_cat: int = 0,
+        static_cardinalities: list = [],
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
@@ -426,8 +445,10 @@ class LagLlamaModel(nn.Module):
         self.num_time_dims = 3 if time_feat else 0
         self.num_lag_dims = input_size * (len(self.lags_seq)) + 2 * input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
+        self.num_feat_static_cat = num_feat_static_cat
+        self.static_cardinalities = static_cardinalities
 
-        feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real
+        feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real + sum(static_cardinalities)
         num_embed_dims = n_embd_per_head * n_head
 
         config = LTSMConfig(
@@ -495,6 +516,7 @@ class LagLlamaModel(nn.Module):
         future_time_feat: Optional[torch.Tensor] = None,
         past_feat_dynamic_real: Optional[torch.Tensor] = None,
         future_feat_dynamic_real: Optional[torch.Tensor] = None,
+        feat_static_cat: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
     ):
         scaled_past_target, loc, scale = self.scaler(
@@ -513,6 +535,23 @@ class LagLlamaModel(nn.Module):
             )  # Shape is (bsz, context_length+(pred_len-1))
         else:
             input = scaled_past_target[..., max(self.lags_seq) :]
+        
+        prior_input = (
+            past_target[..., : max(self.lags_seq)] - loc
+        ) / scale  # This the history used to construct lags.  # bsz, max(self.lags_seq)
+
+        lags = lagged_sequence_values(
+            self.lags_seq, prior_input, input, dim=-1
+        )  # Lags are added as an extra dim. Shape is (bsz, context_length+(pred_len-1), len(self.lags_seq))
+
+        static_feat = torch.cat(
+            (loc.abs().log1p(), scale.log()), dim=-1
+        )  # (bsz, 2) (loc and scale are concatenated)
+        expanded_static_feat = unsqueeze_expand(
+            static_feat, dim=-2, size=lags.shape[-2]
+        )  # (bsz, context_length+(pred_len-1), 2)
+        # expanded_static_feat: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
+
         if past_time_feat is not None:
             time_feat = (
                 torch.cat(
@@ -545,27 +584,19 @@ class LagLlamaModel(nn.Module):
                 else scaled_past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
             )
 
-        prior_input = (
-            past_target[..., : max(self.lags_seq)] - loc
-        ) / scale  # This the history used to construct lags.  # bsz, max(self.lags_seq)
-
-        lags = lagged_sequence_values(
-            self.lags_seq, prior_input, input, dim=-1
-        )  # Lags are added as an extra dim. Shape is (bsz, context_length+(pred_len-1), len(self.lags_seq))
-
-        static_feat = torch.cat(
-            (loc.abs().log1p(), scale.log()), dim=-1
-        )  # (bsz, 2) (loc and scale are concatenated)
-        expanded_static_feat = unsqueeze_expand(
-            static_feat, dim=-2, size=lags.shape[-2]
-        )  # (bsz, context_length+(pred_len-1), 2)
-        # expanded_static_feat: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
+        if feat_static_cat is not None:
+            encoded_feat_static_cat = encode_feat_static_cat(feat_static_cat, self.static_cardinalities)
+            encoded_feat_static_cat = unsqueeze_expand(
+                encoded_feat_static_cat, dim=-2, size=lags.shape[-2]
+            ) 
 
         feature_list = [lags, expanded_static_feat]
         if past_time_feat is not None:
             feature_list.append(time_feat)
         if past_feat_dynamic_real is not None:
             feature_list.append(scaled_feat_dynamic_real)
+        if feat_static_cat is not None:
+            feature_list.append(encoded_feat_static_cat)
 
         return torch.cat(feature_list, dim=-1), loc, scale
 
@@ -577,6 +608,7 @@ class LagLlamaModel(nn.Module):
         future_time_feat: Optional[torch.Tensor] = None,
         past_feat_dynamic_real: Optional[torch.Tensor] = None,
         future_feat_dynamic_real: Optional[torch.Tensor] = None,
+        feat_static_cat: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
         use_kv_cache: bool = False,
     ) -> torch.Tensor:
@@ -589,6 +621,7 @@ class LagLlamaModel(nn.Module):
             future_time_feat=future_time_feat,
             past_feat_dynamic_real=past_feat_dynamic_real,
             future_feat_dynamic_real=future_feat_dynamic_real,
+            feat_static_cat=feat_static_cat
         )  # return: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
         # To use kv cache for inference and pass recent token to transformer
         if use_kv_cache and self.y_cache:
