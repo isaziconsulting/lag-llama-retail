@@ -56,6 +56,7 @@ PREDICTION_INPUT_NAMES = [
     "past_time_feat",
     "future_time_feat",
     "feat_static_cat",
+    "feat_static_real",
     "past_feat_dynamic_real",
     "future_feat_dynamic_real"
 ]
@@ -155,6 +156,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         time_feat: bool = False,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
+        num_feat_static_real: int = 0,
         static_cardinalities: list = [],
         dropout: float = 0.0,
         lags_seq: list = ["Q", "M", "W", "D", "H", "T", "S"],
@@ -238,6 +240,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         self.time_feat = time_feat
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.num_feat_static_cat = num_feat_static_cat
+        self.num_feat_static_real = num_feat_static_real
         self.static_cardinalities = static_cardinalities
         self.dropout = dropout
         self.data_id_to_name_map = data_id_to_name_map
@@ -274,6 +277,8 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             input_names.remove("future_feat_dynamic_real")
         if not self.num_feat_static_cat:
             input_names.remove("feat_static_cat",)
+        if not self.num_feat_static_real:
+            input_names.remove("feat_static_real",)
 
         return input_names
     
@@ -283,6 +288,8 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             remove_field_names.append(FieldName.FEAT_DYNAMIC_REAL)
         if not self.num_feat_static_cat:
             remove_field_names.append(FieldName.FEAT_STATIC_CAT)
+        if not self.num_feat_static_real:
+            remove_field_names.append(FieldName.FEAT_STATIC_REAL)
         transforms = []
         if len(remove_field_names):
             transforms.append(RemoveFields(field_names=remove_field_names))
@@ -321,6 +328,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             "time_feat": self.time_feat,
             "num_feat_dynamic_real": self.num_feat_dynamic_real,
             "num_feat_static_cat": self.num_feat_static_cat,
+            "num_feat_static_real": self.num_feat_static_real,
             "static_cardinalities": self.static_cardinalities,
             "dropout": self.dropout,
         }

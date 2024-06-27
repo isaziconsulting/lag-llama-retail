@@ -146,6 +146,7 @@ class LagLlamaLightningModule(LightningModule):
         self.time_feat = self.hparams.model_kwargs["time_feat"]
         self.num_feat_dynamic_real = self.hparams.model_kwargs["num_feat_dynamic_real"]
         self.num_feat_static_cat = self.hparams.model_kwargs["num_feat_static_cat"]
+        self.num_feat_static_real = self.hparams.model_kwargs["num_feat_static_real"]
         self.static_cardinalities = self.hparams.model_kwargs["static_cardinalities"]
         # data_id based
         self.train_loss_dict = {}
@@ -238,6 +239,10 @@ class LagLlamaLightningModule(LightningModule):
             feat_static_cat = kwargs["feat_static_cat"]
         else:
             feat_static_cat = None
+        if self.num_feat_static_real:
+            feat_static_real = kwargs["feat_static_real"]
+        else:
+            feat_static_real = None
 
         future_samples = []
         for t in range(self.prediction_length):
@@ -248,6 +253,7 @@ class LagLlamaLightningModule(LightningModule):
                 past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
                 future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
                 feat_static_cat=feat_static_cat,
+                feat_static_real=feat_static_real,
                 past_target=past_target,
                 past_observed_values=past_observed_values,
                 use_kv_cache=self.use_kv_cache,
@@ -303,6 +309,10 @@ class LagLlamaLightningModule(LightningModule):
             feat_static_cat = batch["feat_static_cat"]
         else:
             feat_static_cat = None
+        if self.num_feat_static_real:
+            feat_static_real = batch["feat_static_real"]
+        else:
+            feat_static_real = None
 
         extra_dims = len(future_target.shape) - len(past_target.shape)  # usually 0
         extra_shape = future_target.shape[:extra_dims]  # shape remains the same
@@ -332,6 +342,7 @@ class LagLlamaLightningModule(LightningModule):
             past_feat_dynamic_real=past_feat_dynamic_real,
             future_feat_dynamic_real=future_feat_dynamic_real,
             feat_static_cat=feat_static_cat,
+            feat_static_real=feat_static_real,
             future_target=future_target_reshaped,
         )  # distr_args is a tuple with two tensors of shape (bsz, context_length+pred_len-1)
         context_target = take_last(
@@ -404,6 +415,10 @@ class LagLlamaLightningModule(LightningModule):
             feat_static_cat = batch["feat_static_cat"]
         else:
             feat_static_cat = None
+        if self.num_feat_static_real:
+            feat_static_real = batch["feat_static_real"]
+        else:
+            feat_static_real = None
 
         extra_dims = len(future_target.shape) - len(past_target.shape)  # usually 0
         extra_shape = future_target.shape[:extra_dims]  # shape remains the same
@@ -435,6 +450,7 @@ class LagLlamaLightningModule(LightningModule):
                 past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
                 future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
                 feat_static_cat=feat_static_cat,
+                feat_static_real=feat_static_real,
                 past_target=past_target,
                 past_observed_values=past_observed_values,
                 use_kv_cache=True,

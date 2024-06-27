@@ -436,6 +436,7 @@ class LagLlamaModel(nn.Module):
         time_feat: bool = True,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
+        num_feat_static_real: int = 0,
         static_cardinalities: list = [],
         dropout: float = 0.0,
     ) -> None:
@@ -446,9 +447,10 @@ class LagLlamaModel(nn.Module):
         self.num_lag_dims = input_size * (len(self.lags_seq)) + 2 * input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.num_feat_static_cat = num_feat_static_cat
+        self.num_feat_static_real = num_feat_static_real
         self.static_cardinalities = static_cardinalities
 
-        feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real + sum(static_cardinalities)
+        feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real + sum(static_cardinalities) + num_feat_static_real
         num_embed_dims = n_embd_per_head * n_head
 
         config = LTSMConfig(
@@ -517,6 +519,7 @@ class LagLlamaModel(nn.Module):
         past_feat_dynamic_real: Optional[torch.Tensor] = None,
         future_feat_dynamic_real: Optional[torch.Tensor] = None,
         feat_static_cat: Optional[torch.Tensor] = None,
+        feat_static_real: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
     ):
         scaled_past_target, loc, scale = self.scaler(
@@ -590,6 +593,11 @@ class LagLlamaModel(nn.Module):
                 encoded_feat_static_cat, dim=-2, size=lags.shape[-2]
             ) 
 
+        if feat_static_real is not None:
+            feat_static_real = unsqueeze_expand(
+                feat_static_real, dim=-2, size=lags.shape[-2]
+            )
+
         feature_list = [lags, expanded_static_feat]
         if past_time_feat is not None:
             feature_list.append(time_feat)
@@ -597,6 +605,8 @@ class LagLlamaModel(nn.Module):
             feature_list.append(scaled_feat_dynamic_real)
         if feat_static_cat is not None:
             feature_list.append(encoded_feat_static_cat)
+        if feat_static_real is not None:
+            feature_list.append(feat_static_real)
 
         return torch.cat(feature_list, dim=-1), loc, scale
 
@@ -609,6 +619,7 @@ class LagLlamaModel(nn.Module):
         past_feat_dynamic_real: Optional[torch.Tensor] = None,
         future_feat_dynamic_real: Optional[torch.Tensor] = None,
         feat_static_cat: Optional[torch.Tensor] = None,
+        feat_static_real: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
         use_kv_cache: bool = False,
     ) -> torch.Tensor:
@@ -621,7 +632,8 @@ class LagLlamaModel(nn.Module):
             future_time_feat=future_time_feat,
             past_feat_dynamic_real=past_feat_dynamic_real,
             future_feat_dynamic_real=future_feat_dynamic_real,
-            feat_static_cat=feat_static_cat
+            feat_static_cat=feat_static_cat,
+            feat_static_real=feat_static_real
         )  # return: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
         # To use kv cache for inference and pass recent token to transformer
         if use_kv_cache and self.y_cache:
