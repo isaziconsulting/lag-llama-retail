@@ -439,18 +439,23 @@ class LagLlamaModel(nn.Module):
         num_feat_static_real: int = 0,
         static_cardinalities: list = [],
         dropout: float = 0.0,
+        scale_feat_indices: list = []
     ) -> None:
         super().__init__()
         self.context_length = context_length
         self.lags_seq = lags_seq
         self.num_time_dims = 3 if time_feat else 0
+        # Num lags + loc & scale used for standardizing the lags
         self.num_lag_dims = input_size * (len(self.lags_seq)) + 2 * input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.num_feat_static_cat = num_feat_static_cat
         self.num_feat_static_real = num_feat_static_real
         self.static_cardinalities = static_cardinalities
+        self.scale_feat_indices = scale_feat_indices
+        self.unscaled_feat_indices = [i for i in range(num_feat_dynamic_real) if i not in self.scale_feat_indices]
 
-        feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real + sum(static_cardinalities) + num_feat_static_real
+        # Lag dims + time dims + dynamic real feats + loc & scale for standardized feats + dims for one-hot encoding of static categoricals + num static real feats
+        feature_size = self.num_lag_dims + self.num_time_dims + num_feat_dynamic_real + 2 * len(scale_feat_indices) + sum(static_cardinalities) + num_feat_static_real
         num_embed_dims = n_embd_per_head * n_head
 
         config = LTSMConfig(
@@ -547,13 +552,9 @@ class LagLlamaModel(nn.Module):
             self.lags_seq, prior_input, input, dim=-1
         )  # Lags are added as an extra dim. Shape is (bsz, context_length+(pred_len-1), len(self.lags_seq))
 
-        static_feat = torch.cat(
+        scaling_feat = torch.cat(
             (loc.abs().log1p(), scale.log()), dim=-1
         )  # (bsz, 2) (loc and scale are concatenated)
-        expanded_static_feat = unsqueeze_expand(
-            static_feat, dim=-2, size=lags.shape[-2]
-        )  # (bsz, context_length+(pred_len-1), 2)
-        # expanded_static_feat: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
 
         if past_time_feat is not None:
             time_feat = (
@@ -569,22 +570,50 @@ class LagLlamaModel(nn.Module):
             )
 
         if past_feat_dynamic_real is not None:
-            past_observed_feats = past_observed_values[..., :past_feat_dynamic_real.size(1)].unsqueeze(-1)
-            past_observed_feats = past_observed_feats.expand(-1, -1, past_feat_dynamic_real.size(-1))
+            # Select unscaled features
+            past_unscaled_feat_dynamic_real = past_feat_dynamic_real[..., self.unscaled_feat_indices]
+            if future_feat_dynamic_real is not None:
+                future_unscaled_feat_dynamic_real = future_feat_dynamic_real[..., self.unscaled_feat_indices]
+                unscaled_feat_dynamic_real = torch.cat(
+                    (past_unscaled_feat_dynamic_real[..., max(self.lags_seq) + 1:, :], future_unscaled_feat_dynamic_real), dim=1
+                )
+            else:
+                unscaled_feat_dynamic_real = past_unscaled_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
+    
+            # Select and scale features
+            past_feat_dynamic_real_to_scale = past_feat_dynamic_real[..., self.scale_feat_indices]
+            # Expand observed values (bsz, seq_len) to all features (bsz, seq_len, num_feat_dynamic_real)
+            past_observed_feats_to_scale = past_observed_values[..., :past_feat_dynamic_real.size(1)].unsqueeze(-1)
+            past_observed_feats_to_scale = past_observed_feats_to_scale.expand(-1, -1, len(self.scale_feat_indices))
+
             scaled_past_feat_dynamic_real, feat_loc, feat_scale = self.scaler(
-                past_feat_dynamic_real, past_observed_feats
+                past_feat_dynamic_real_to_scale, past_observed_feats_to_scale
             )
-            scaled_feat_dynamic_real = (
-                torch.cat(
+            
+            # Concatenate target scaling features with new scaling features
+            batch_size = scaling_feat.size(0)
+            scaling_feat = torch.cat(
+                (scaling_feat, feat_loc.abs().log1p().view(batch_size, -1), feat_scale.log().view(batch_size, -1)), dim=-1
+            )  # (bsz, 2 + 2 * len(self.real_feats_to_scale))
+            
+            if future_feat_dynamic_real is not None:
+                scaled_feat_dynamic_real = torch.cat(
                     (
                         scaled_past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :],
-                        (future_feat_dynamic_real - feat_loc)
-                        / feat_scale,
+                        (future_feat_dynamic_real[..., self.scale_feat_indices] - feat_loc) / feat_scale,
                     ),
                     dim=1,
                 )
-                if future_feat_dynamic_real is not None
-                else scaled_past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
+            else:
+                scaled_feat_dynamic_real = scaled_past_feat_dynamic_real[..., max(self.lags_seq) + 1:, :]
+            
+            # Concatenate scaled and unscaled features
+            feat_dynamic_real = torch.cat(
+                (
+                    unscaled_feat_dynamic_real,
+                    scaled_feat_dynamic_real
+                ),
+                dim=-1
             )
 
         if feat_static_cat is not None:
@@ -598,11 +627,15 @@ class LagLlamaModel(nn.Module):
                 feat_static_real, dim=-2, size=lags.shape[-2]
             )
 
-        feature_list = [lags, expanded_static_feat]
+        expanded_scaling_feat = unsqueeze_expand(
+            scaling_feat, dim=-2, size=lags.shape[-2]
+        )  # (bsz, context_length+(pred_len-1), 2)
+        # expanded_scaling_feat: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
+        feature_list = [lags, expanded_scaling_feat]
         if past_time_feat is not None:
             feature_list.append(time_feat)
         if past_feat_dynamic_real is not None:
-            feature_list.append(scaled_feat_dynamic_real)
+            feature_list.append(feat_dynamic_real)
         if feat_static_cat is not None:
             feature_list.append(encoded_feat_static_cat)
         if feat_static_real is not None:

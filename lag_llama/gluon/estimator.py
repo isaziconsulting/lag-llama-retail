@@ -159,6 +159,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         num_feat_static_real: int = 0,
         static_cardinalities: list = [],
         dropout: float = 0.0,
+        scale_feat_indices = [],
         lags_seq: list = ["Q", "M", "W", "D", "H", "T", "S"],
         data_id_to_name_map: dict = {},
         use_cosine_annealing_lr: bool = False,
@@ -243,6 +244,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         self.num_feat_static_real = num_feat_static_real
         self.static_cardinalities = static_cardinalities
         self.dropout = dropout
+        self.scale_feat_indices = scale_feat_indices
         self.data_id_to_name_map = data_id_to_name_map
         # Cannot set both a full checkpoint and partial weights checkpoint
         assert ckpt_path is None or partial_weights_ckpt_path is None
@@ -331,6 +333,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             "num_feat_static_real": self.num_feat_static_real,
             "static_cardinalities": self.static_cardinalities,
             "dropout": self.dropout,
+            "scale_feat_indices": self.scale_feat_indices,
         }
         if self.ckpt_path is not None:
             return LagLlamaLightningModule.load_from_checkpoint(
