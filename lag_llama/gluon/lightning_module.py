@@ -282,7 +282,7 @@ class LagLlamaLightningModule(LightningModule):
         )
 
     # train
-    def _compute_loss(self, batch, do_not_average=False, return_observed_values=False):
+    def _compute_loss(self, batch, do_not_average=False, return_observed_values=False, validating=False):
         past_target = batch[
             "past_target"
         ]  # (bsz, model.context_length+max(model.lags_seq))
@@ -352,9 +352,15 @@ class LagLlamaLightningModule(LightningModule):
             (context_target, future_target_reshaped),
             dim=1,
         )  # (bsz, context_length-1+pred_len) # values that can be predicted
+        
         context_observed = take_last(
             past_observed_values, dim=-1, num=self.context_length - 1
         )  # same as context_target, but for observed_values tensor
+
+        # If we are validating, ignore the context window when computing loss by marking it not observed
+        # As the context window will overlap into the training set
+        if validating:
+            context_observed = torch.zeros_like(context_observed)
 
         observed_values = torch.cat(
             (context_observed, future_observed_reshaped), dim=1
@@ -386,95 +392,6 @@ class LagLlamaLightningModule(LightningModule):
             return loss
         else:
             return loss, observed_values
-
-    # validation
-    def _compute_val_loss(self, batch):
-        past_target = batch[
-            "past_target"
-        ]  # (bsz, model.context_length+max(model.lags_seq))
-        past_observed_values = batch[
-            "past_observed_values"
-        ]  # (bsz, model.context_length+max(model.lags_seq)) with 0s or 1s indicating available (1s) or missing (0s)
-        future_target = batch["future_target"]  # (bsz, model.prediction_length)
-        future_observed_values = batch[
-            "future_observed_values"
-        ]  # (bsz, model.prediction_length) with 0s or 1s indicating available (1s) or missing (0s)
-        if self.time_feat:
-            past_time_feat = batch["past_time_feat"]
-            future_time_feat = batch["future_time_feat"]
-        else:
-            past_time_feat = None
-            future_time_feat = None
-        if self.num_feat_dynamic_real:
-            past_feat_dynamic_real = batch["past_feat_dynamic_real"]
-            future_feat_dynamic_real = batch["future_feat_dynamic_real"]
-        else:
-            past_feat_dynamic_real = None
-            future_feat_dynamic_real = None
-        if self.num_feat_static_cat:
-            feat_static_cat = batch["feat_static_cat"]
-        else:
-            feat_static_cat = None
-        if self.num_feat_static_real:
-            feat_static_real = batch["feat_static_real"]
-        else:
-            feat_static_real = None
-
-        extra_dims = len(future_target.shape) - len(past_target.shape)  # usually 0
-        extra_shape = future_target.shape[:extra_dims]  # shape remains the same
-
-        repeats = prod(extra_shape)  # usually 1
-        past_target = repeat_along_dim(
-            past_target, 0, repeats
-        )  # (bsz, model.context_length+max(model.lags_seq))
-        past_observed_values = repeat_along_dim(
-            past_observed_values, 0, repeats
-        )  # (bsz, model.context_length+max(model.lags_seq))
-
-        future_target_reshaped = future_target.reshape(
-            -1,
-            *future_target.shape[extra_dims + 1 :],
-        )  # (bsz, model.prediction_length)
-        future_observed_reshaped = future_observed_values.reshape(
-            -1,
-            *future_observed_values.shape[extra_dims + 1 :],
-        )  # (bsz, model.prediction_length)
-
-        target = future_target_reshaped
-        observed_values = future_observed_reshaped
-        preds = torch.zeros_like(target)
-        for t in range(self.prediction_length):
-            params, loc, scale = self.model(
-                past_time_feat=past_time_feat if self.time_feat else None,
-                future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
-                past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
-                future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
-                feat_static_cat=feat_static_cat,
-                feat_static_real=feat_static_real,
-                past_target=past_target,
-                past_observed_values=past_observed_values,
-                use_kv_cache=True,
-            )
-
-            distr_args = [
-                p[:, -1:] for p in params
-            ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
-            distr = self.model.distr_output.distribution(
-                distr_args, loc=loc, scale=scale
-            )
-            preds[:, t] = distr.mean[:, 0]
-
-            past_target = torch.cat((past_target, distr.mean), dim=1)
-            past_observed_values = torch.cat(
-                (past_observed_values, torch.ones_like(distr.mean)), dim=1
-            )
-
-        self.model.reset_cache()
-
-        preds = preds * observed_values
-        target = target * observed_values
-        rE = torch.sum(torch.abs(preds - target))/torch.sum(target) if torch.sum(target) > 0 else 0
-        return rE
 
     def training_step(self, batch, batch_idx: int):  # type: ignore
         """
@@ -544,9 +461,13 @@ class LagLlamaLightningModule(LightningModule):
         """
         Execute validation step.
         """
-        val_loss = self._compute_val_loss(batch)
-        self.log("val_loss", val_loss, on_epoch=True, on_step=False, prog_bar=False)
-        return val_loss
+        val_loss_per_sample, observed_values = self._compute_loss(
+            batch, do_not_average=True, return_observed_values=True, validating=True
+        )
+
+        val_loss_avg = val_loss_per_sample.sum() / observed_values.sum().clamp_min(1.0)
+        self.log("val_loss", val_loss_avg, on_epoch=True, on_step=False, prog_bar=False)
+        return val_loss_avg
 
     def on_validation_epoch_end(self):
         # Log all losses
