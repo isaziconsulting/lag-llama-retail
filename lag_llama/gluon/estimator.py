@@ -28,6 +28,7 @@ from gluonts.time_feature import (
     time_features_from_frequency_str,
 )
 from gluonts.torch.distributions import StudentTOutput, NegativeBinomialOutput
+from ..gluon.distributions import PoissonOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
 from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
@@ -196,6 +197,8 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             distr_output = StudentTOutput()
         elif distr_output == "neg_bin":
             distr_output = NegativeBinomialOutput()
+        elif distr_output == "poisson":
+            distr_output = PoissonOutput()
         elif distr_output == "iqn":
             distr_output = ImplicitQuantileNetworkOutput()
         self.distr_output = distr_output

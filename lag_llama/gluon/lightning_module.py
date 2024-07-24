@@ -229,18 +229,26 @@ class LagLlamaLightningModule(LightningModule):
         past_observed_values = kwargs[
             "past_observed_values"
         ]  # (bsz, model.context_length+max(model.lags_seq))
+        repeated_past_target = past_target.repeat_interleave(self.model.num_parallel_samples, 0)
+        repeated_past_observed_values = past_observed_values.repeat_interleave(self.model.num_parallel_samples, 0)
         if self.time_feat:
             past_time_feat = kwargs["past_time_feat"]
             future_time_feat = kwargs["future_time_feat"]
+            repeated_past_time_feat = past_time_feat.repeat_interleave(self.model.num_parallel_samples, 0)
+            repeated_future_time_feat = future_time_feat.repeat_interleave(self.model.num_parallel_samples, 0)
         if self.num_feat_dynamic_real:
             past_feat_dynamic_real = kwargs["past_feat_dynamic_real"]
             future_feat_dynamic_real = kwargs["future_feat_dynamic_real"]
+            repeated_past_feat_dynamic_real = past_feat_dynamic_real.repeat_interleave(self.model.num_parallel_samples, 0)
+            repeated_future_feat_dynamic_real = future_feat_dynamic_real.repeat_interleave(self.model.num_parallel_samples, 0)
         if self.num_feat_static_cat:
             feat_static_cat = kwargs["feat_static_cat"]
+            repeated_feat_static_cat = feat_static_cat.repeat_interleave(self.model.num_parallel_samples, 0)
         else:
             feat_static_cat = None
         if self.num_feat_static_real:
             feat_static_real = kwargs["feat_static_real"]
+            repeated_feat_static_real = feat_static_real.repeat_interleave(self.model.num_parallel_samples, 0)
         else:
             feat_static_real = None
 
@@ -248,14 +256,14 @@ class LagLlamaLightningModule(LightningModule):
         for t in range(self.prediction_length):
             params, loc, scale = self.model(
                 *args,
-                past_time_feat=past_time_feat if self.time_feat else None,
-                future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
-                past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
-                future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
-                feat_static_cat=feat_static_cat,
-                feat_static_real=feat_static_real,
-                past_target=past_target,
-                past_observed_values=past_observed_values,
+                past_time_feat=repeated_past_time_feat if self.time_feat else None,
+                future_time_feat=repeated_future_time_feat[..., : t + 1, :] if self.time_feat else None,
+                past_feat_dynamic_real=repeated_past_feat_dynamic_real if self.num_feat_dynamic_real else None,
+                future_feat_dynamic_real=repeated_future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
+                feat_static_cat=repeated_feat_static_cat if self.num_feat_static_cat else None,
+                feat_static_real=repeated_feat_static_real if self.num_feat_static_real else None,
+                past_target=repeated_past_target,
+                past_observed_values=repeated_past_observed_values,
                 use_kv_cache=self.use_kv_cache,
             )
 
@@ -263,14 +271,14 @@ class LagLlamaLightningModule(LightningModule):
                 p[:, -1:] for p in params
             ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
             distr = self.model.distr_output.distribution(sliced_params, loc, scale)
-            sample = distr.mean  # (#bsz*#parallel_samples, 1)
+            sample = distr.sample()  # (#bsz*#parallel_samples, 1)
             if self.nonnegative_pred_samples:
                 sample = F.relu(sample)
             future_samples.append(sample)
 
-            past_target = torch.cat((past_target, sample), dim=1)
-            past_observed_values = torch.cat(
-                (past_observed_values, torch.ones_like(sample)), dim=1
+            repeated_past_target = torch.cat((repeated_past_target, sample), dim=1)
+            repeated_past_observed_values = torch.cat(
+                (repeated_past_observed_values, torch.ones_like(sample)), dim=1
             )
 
         self.model.reset_cache()
@@ -416,6 +424,10 @@ class LagLlamaLightningModule(LightningModule):
                 batch["past_target"], batch["future_target"] = self.augmentations(
                     batch["past_target"], batch["future_target"]
                 )
+
+        if self.nonnegative_pred_samples:
+            batch["past_target"] = F.relu(batch["past_target"])
+            batch["future_target"] = F.relu(batch["future_target"])
 
         train_loss_per_sample, observed_values = self._compute_loss(
             batch, do_not_average=True, return_observed_values=True

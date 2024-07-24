@@ -24,6 +24,7 @@ from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
 from gluonts.torch.util import lagged_sequence_values, unsqueeze_expand
 
 from ...gluon_utils.scalers.robust_scaler import RobustScaler
+from ..gluon.distributions import PoissonOutput
 
 @dataclass
 class LTSMConfig:
@@ -688,6 +689,9 @@ class LagLlamaModel(nn.Module):
         params = self.param_proj(
             x
         )  # (bsz, context_length+(pred_len-1)) ; (bsz, context_length+(pred_len-1))
+        if isinstance(self.distr_output, PoissonOutput):
+            # Take exponential since poisson distr can't take in negative parameters
+            params = (torch.relu(params[0]).clone(),)
         return params, loc, scale
 
     def reset_cache(self) -> None:
