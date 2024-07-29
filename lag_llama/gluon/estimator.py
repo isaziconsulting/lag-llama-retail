@@ -345,7 +345,6 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 weight_decay=self.weight_decay,
                 context_length=self.context_length,
                 prediction_length=self.prediction_length,
-                model_kwargs=model_kwargs,
                 # Augmentations
                 aug_prob=self.aug_prob,
                 freq_mask_rate=self.freq_mask_rate,
