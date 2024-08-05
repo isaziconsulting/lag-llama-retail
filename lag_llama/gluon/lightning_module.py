@@ -416,6 +416,10 @@ class LagLlamaLightningModule(LightningModule):
                 batch["past_target"], batch["future_target"] = self.augmentations(
                     batch["past_target"], batch["future_target"]
                 )
+        
+        if self.nonnegative_pred_samples:
+            batch["past_target"] = F.relu(batch["past_target"])
+            batch["future_target"] = F.relu(batch["future_target"])
 
         train_loss_per_sample, observed_values = self._compute_loss(
             batch, do_not_average=True, return_observed_values=True
