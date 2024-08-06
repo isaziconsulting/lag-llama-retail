@@ -381,12 +381,23 @@ class LagLlamaLightningModule(LightningModule):
             distr = self.model.distr_output.distribution(
                 distr_args, loc=loc, scale=scale
             )  # an object representing a distribution with the specified parameters. We need this to compute the NLL loss.
-            if not do_not_average:
-                loss = (
-                    self.loss(distr, target) * observed_values
-                ).sum() / observed_values.sum().clamp_min(1.0)
+            
+            if hasattr(self.loss, 'name') and self.loss.name == 'mean-absolute-scaled-error':
+                # Absolute scaled error requires a naive forecast
+                # We take this as whatever the previous target was
+                context_naive_forecast = take_last(
+                    past_target, dim=-1, num=self.context_length
+                )  # (bsz, context_length)
+                naive_forecast = torch.cat(
+                    (context_naive_forecast, future_target_reshaped[:, :-1]),
+                    dim=1,
+                )  # (bsz, context_length+pred_len-1) # values that can be predicted
+                loss = self.loss(distr, target, naive_forecast) * observed_values
             else:
                 loss = self.loss(distr, target) * observed_values
+            
+            if not do_not_average:
+                loss = loss.sum() / observed_values.sum().clamp_min(1.0)
 
         if not return_observed_values:
             return loss
@@ -428,6 +439,8 @@ class LagLlamaLightningModule(LightningModule):
         train_loss_avg = train_loss_per_sample.sum() / observed_values.sum().clamp_min(
             1.0
         )
+        if(self.loss.name in ['root-mean-squared-error', 'huber-loss']):
+            train_loss_avg = torch.sqrt(train_loss_avg)
         self.log(
             "train_loss", train_loss_avg, on_epoch=True, on_step=False, prog_bar=False
         )
@@ -470,6 +483,10 @@ class LagLlamaLightningModule(LightningModule):
         )
 
         val_loss_avg = val_loss_per_sample.sum() / observed_values.sum().clamp_min(1.0)
+
+        if(self.loss.name in ['root-mean-squared-error', 'huber-loss']):
+            val_loss_avg = torch.sqrt(val_loss_avg)
+        
         self.log("val_loss", val_loss_avg, on_epoch=True, on_step=False, prog_bar=False)
         return val_loss_avg
 
