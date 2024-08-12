@@ -439,7 +439,7 @@ class LagLlamaLightningModule(LightningModule):
         train_loss_avg = train_loss_per_sample.sum() / observed_values.sum().clamp_min(
             1.0
         )
-        if(self.loss.name in ['root-mean-squared-error', 'huber-loss']):
+        if hasattr(self.loss, 'name') and self.loss.name in ['root-mean-squared-error', 'huber-loss']:
             train_loss_avg = torch.sqrt(train_loss_avg)
         self.log(
             "train_loss", train_loss_avg, on_epoch=True, on_step=False, prog_bar=False
@@ -484,7 +484,7 @@ class LagLlamaLightningModule(LightningModule):
 
         val_loss_avg = val_loss_per_sample.sum() / observed_values.sum().clamp_min(1.0)
 
-        if(self.loss.name in ['root-mean-squared-error', 'huber-loss']):
+        if hasattr(self.loss, 'name') and self.loss.name in ['root-mean-squared-error', 'huber-loss']:
             val_loss_avg = torch.sqrt(val_loss_avg)
         
         self.log("val_loss", val_loss_avg, on_epoch=True, on_step=False, prog_bar=False)
