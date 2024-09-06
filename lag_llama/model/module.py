@@ -690,6 +690,29 @@ class LagLlamaModel(nn.Module):
         )  # (bsz, context_length+(pred_len-1)) ; (bsz, context_length+(pred_len-1))
         return params, loc, scale
 
+    def forward_shap(
+        self,
+        input: torch.Tensor
+    ) -> torch.Tensor:
+
+        use_kv_cache = False
+        # Get token embeddings
+        x = self.transformer.wte(
+            input
+        )  # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
+
+        for block in self.transformer.h:
+            x = block(x, use_kv_cache)
+        x = self.transformer.ln_f(
+            x
+        )  # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
+        if use_kv_cache:
+            self.y_cache = True
+        params = self.param_proj(
+            x
+        )  # (bsz, context_length+(pred_len-1)) ; (bsz, context_length+(pred_len-1))
+        return params
+    
     def reset_cache(self) -> None:
         """
         Resets all cached key-values in attention.

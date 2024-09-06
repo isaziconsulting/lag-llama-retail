@@ -11,10 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from torch import nn
+import os
 import random
 
 import numpy as np
+import matplotlib.pyplot as plt
+import io
+from PIL import Image
+import shap
 
 from lightning import LightningModule
 import torch
@@ -42,6 +47,7 @@ from ...gluon_utils.gluon_ts_distributions.implicit_quantile_network import (
     ImplicitQuantileNetworkOutput,
 )
 from ...lag_llama.model.module import LagLlamaModel
+from pytorch_lightning.loggers import TensorBoardLogger
 
 
 class LagLlamaLightningModule(LightningModule):
@@ -221,6 +227,58 @@ class LagLlamaLightningModule(LightningModule):
 
         self.augmentations = ApplyAugmentations(self.transforms)
 
+        # Lags (target and lag indices)
+        lag_labels = ['volume'] + [f'lag {lag}' for lag in self.model.lags_seq[1:]]
+
+        # Scaling feature labels
+        scaling_labels = ['volume med', 'volume iqr', 'planned promo med', 'planned promo iqr']
+
+        # Time feature labels
+        time_labels = ['dow', 'dom', 'doy']
+
+        # Dynamic feature labels (hardcoded)
+        dynamic_labels = [
+            'rel_promo_price', 'is_promo', 'promo_strength', 
+            'is_single_price_promo', 'is_multibuy_promo', 
+            'rel_price', 'planned_promo_vol'
+        ]
+
+        # Combine all the labels
+        self.feature_names = lag_labels + scaling_labels + time_labels + dynamic_labels
+
+    def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
+            output_dir = "shap_results"
+            os.makedirs(output_dir, exist_ok=True)
+
+            shap_model = ShapModelWrapper(self.model)
+            with torch.set_grad_enabled(True):
+                inputs, loc, scale = self.model.prepare_input(past_target,
+                                                    past_observed_values,
+                                                    past_time_feat,
+                                                    future_time_feat,
+                                                    past_feat_dynamic_real,
+                                                    future_feat_dynamic_real)
+            # Create a wrapper for your model
+            inputs.requires_grad = True
+            with torch.set_grad_enabled(True):
+                explainer = shap.GradientExplainer(shap_model, inputs)
+                shap_values = explainer.shap_values(inputs, nsamples=1000)
+
+            text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
+            with open(text_file_path, 'w') as f:
+                for i, label in enumerate(self.feature_names):
+                    shap_value_aggregated = abs(shap_values[:, :, i]).sum()  # Aggregate over time steps
+                    f.write(f'{label} Total SHAP magnitude: {shap_value_aggregated}\n')
+
+            shap_values_reshaped = shap_values.squeeze(-1)  # Remove the last dimension, shape becomes (batch_size, context_length, feature_size)
+            shap_values_reshaped = shap_values_reshaped.reshape(-1, shap_values_reshaped.shape[-1])  # Reshape to (batch_size * context_length, feature_size)
+            max_disp=22
+            
+            shap.summary_plot(shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
+            file_path = f"{output_dir}/shap_summary_plot_bee.png"
+            plt.savefig(file_path, format='png')
+            plt.close()
+
     # greedy prediction
     def forward(self, *args, **kwargs):
         past_target = kwargs[
@@ -246,6 +304,18 @@ class LagLlamaLightningModule(LightningModule):
 
         future_samples = []
         for t in range(self.prediction_length):
+            self.log_shap_values(
+                            past_time_feat=past_time_feat if self.time_feat else None,
+                            future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
+                            past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
+                            future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
+                            feat_static_cat=feat_static_cat,
+                            feat_static_real=feat_static_real,
+                            past_target=past_target,
+                            past_observed_values=past_observed_values,
+                            future_target=None
+                        )
+
             params, loc, scale = self.model(
                 *args,
                 past_time_feat=past_time_feat if self.time_feat else None,
@@ -280,7 +350,7 @@ class LagLlamaLightningModule(LightningModule):
             (-1, self.model.num_parallel_samples, self.prediction_length)
             + self.model.distr_output.event_shape,
         )
-
+    
     # train
     def _compute_loss(self, batch, do_not_average=False, return_observed_values=False, validating=False):
         past_target = batch[
@@ -404,6 +474,70 @@ class LagLlamaLightningModule(LightningModule):
         else:
             return loss, observed_values
 
+    def _log_bar_plot(self, values, tag):
+        # Log the labels and values as scalars in case
+        for i, label in enumerate(self.feature_names):
+            self.logger.experiment.add_scalar(f'{tag}-{label}-scalar', values[i], self.current_epoch)
+
+        # Create the bar plot
+        plt.figure(figsize=(12, 6))  # Adjusted size for clarity
+        plt.bar(range(len(values)), values, tick_label=self.feature_names)
+        plt.xlabel('Feature')
+        plt.ylabel('Importance')
+
+        # Rotate and align the labels for readability
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+
+        # Save the plot to a buffer
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close()
+        buf.seek(0)
+
+        # Open the image from buffer and convert it to a tensor
+        image = Image.open(buf)
+        image = np.array(image)  # Convert to NumPy array (H, W, C)
+        
+        # Convert the image from HWC (Height, Width, Channels) to CHW (Channels, Height, Width)
+        image_tensor = torch.tensor(image).permute(2, 0, 1)  # Convert to CHW format
+        
+        # Log the image to TensorBoard
+        self.logger.experiment.add_image(tag, image_tensor, self.current_epoch)
+
+    def log_token_embed_layer(self):
+        weight_matrix = self.state_dict()['model.transformer.wte.weight']
+
+        # Log the histograms of weights for the embedding layer
+        self.logger.experiment.add_histogram("embedding weights", weight_matrix, self.current_epoch)
+
+        # Log feature importance plots using L2 norm & sum of absolute weights
+        l2_norms = []
+        sum_abs_weights = []
+
+        # Transpose the weight matrix to access features as rows instead of columns
+        weight_matrix_t = weight_matrix.T  # Shape is now [features, embeddings]
+
+        # Compute metrics for each input feature (column in the original weight matrix)
+        for i in range(weight_matrix_t.size(0)):  # Loop over each input feature
+            feature_weights = weight_matrix_t[i]
+
+            # Calculate the sum of absolute weights for each feature
+            sum_abs_weights.append(torch.sum(torch.abs(feature_weights)).item())
+
+            # Calculate the L2 norm for each feature
+            l2_norms.append(torch.norm(feature_weights, p=2).item())
+
+        # Log bar plot for sum of absolute weights
+        self._log_bar_plot(sum_abs_weights, 'sum_abs_weights_bar')
+
+        # Log bar plot for L2 norm
+        self._log_bar_plot(l2_norms, 'l2_norm_weights_bar')
+
+        # Log individual feature histograms of weights for the projection layer
+        for i in range(weight_matrix_t.size(0)):  # Loop over each input feature
+            self.logger.experiment.add_histogram(f'weights/feature_{i}', weight_matrix_t[i], self.current_epoch)
+
     def training_step(self, batch, batch_idx: int):  # type: ignore
         """
         Execute training step.
@@ -447,6 +581,7 @@ class LagLlamaLightningModule(LightningModule):
         return train_loss_avg
 
     def on_train_epoch_end(self):
+        self.log_token_embed_layer()
         # Log all losses
         for key, value in self.train_loss_dict.items():
             loss_avg = np.mean(value)
@@ -541,3 +676,16 @@ class LagLlamaLightningModule(LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
         else:
             return optimizer
+
+class ShapModelWrapper(nn.Module):
+    def __init__(self, model):
+        super(ShapModelWrapper, self).__init__()
+        self.model = model
+
+    def __call__(self, inputs):
+        params = self.model.forward_shap(inputs)
+        sliced_params = [
+            p[:, -1:] for p in params
+        ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
+        distr = self.model.distr_output.distribution(sliced_params)
+        return distr.mean
