@@ -258,18 +258,20 @@ class LagLlamaLightningModule(LightningModule):
                                                     future_time_feat,
                                                     past_feat_dynamic_real,
                                                     future_feat_dynamic_real)
-            # Create a wrapper for your model
             inputs.requires_grad = True
             bsz, seq_len, num_feats = inputs.size()
             inputs = inputs.view(bsz, seq_len * num_feats)
-            # Split into two half size batches
+            # Split into two shuffled half size batches
+            indices = torch.randperm(bsz)
             bsz = bsz//2
-            train_inputs, test_inputs = inputs[:bsz], inputs[bsz:]
+            train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
+
+            # Wrap the model so it's compatble with Shap
             shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
 
             with torch.set_grad_enabled(True):
                 explainer = shap.GradientExplainer(shap_model, train_inputs)
-                shap_values = explainer.shap_values(test_inputs, nsamples=10240)
+                shap_values = explainer.shap_values(test_inputs)
             shap_values_reshaped = shap_values.reshape(bsz * seq_len, num_feats)  # Reshape to (batch_size * context_length, feature_size)
 
             text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
