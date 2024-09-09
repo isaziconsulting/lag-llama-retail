@@ -246,6 +246,7 @@ class LagLlamaLightningModule(LightningModule):
         self.feature_names = lag_labels + scaling_labels + time_labels + dynamic_labels
         self.iter_index = 1
         self.cumulative_shap_values = None
+        self.cumulative_promo_mask = None
 
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
             output_dir = f"shap_results/batch_{self.iter_index}"
@@ -266,26 +267,26 @@ class LagLlamaLightningModule(LightningModule):
             indices = torch.randperm(bsz)
             bsz = bsz//2
             train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
-            test_loc = test_loc[indices[bsz:]]
-            test_scale = test_scale[indices[bsz:]]
 
             # Wrap the model so it's compatble with Shap
-            shap_model = ShapModelWrapper(self.model, test_loc, test_scale, (bsz, seq_len, num_feats))
+            shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
 
             with torch.set_grad_enabled(True):
                 explainer = shap.GradientExplainer(shap_model, train_inputs)
                 shap_values = explainer.shap_values(test_inputs)
-            shap_values_reshaped = shap_values.reshape(bsz * seq_len, num_feats)  # Reshape to (batch_size * context_length, feature_size)
+            # We only care about the effects of features at a particular time step
+            time_step = -1
+            shap_values_sliced = shap_values.reshape(bsz, seq_len, num_feats)[:, time_step, :]
 
             if self.cumulative_shap_values is None:
-                self.cumulative_shap_values = shap_values_reshaped
+                self.cumulative_shap_values = shap_values_sliced
             else:
-                self.cumulative_shap_values = np.concatenate([self.cumulative_shap_values, shap_values_reshaped])
+                self.cumulative_shap_values = np.concatenate([self.cumulative_shap_values, shap_values_sliced])
 
             text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
             with open(text_file_path, 'w') as f:
                 for i, label in enumerate(self.feature_names):
-                    shap_value_aggregated = abs(self.cumulative_shap_values[:, i]).sum()  # Aggregate over time steps
+                    shap_value_aggregated = abs(self.cumulative_shap_values[:, i]).sum()  # Aggregate over samples
                     f.write(f'{label} Total SHAP magnitude: {shap_value_aggregated}\n')
 
             max_disp=22
@@ -297,10 +298,14 @@ class LagLlamaLightningModule(LightningModule):
 
             # Get promos & non_promos
             is_promo_dim = self.feature_names.index('is_promo')
-            promo_mask = self.cumulative_shap_values.view(bsz, seq_len, num_feats)[..., is_promo_dim] == 1
-            promo_mask = promo_mask.reshape(bsz * seq_len)
-            promo_shap_values_reshaped = self.cumulative_shap_values[promo_mask, :]
-            non_promo_shap_values_reshaped = self.cumulative_shap_values[~promo_mask, :]
+            promo_mask = test_inputs.view(bsz, seq_len, num_feats)[:, time_step, is_promo_dim] == 1
+            promo_mask = promo_mask.squeeze()
+            if self.cumulative_promo_mask is None:
+                self.cumulative_promo_mask = promo_mask
+            else:
+                self.cumulative_promo_mask = np.concatenate([self.cumulative_promo_mask, promo_mask])
+            promo_shap_values_reshaped = self.cumulative_shap_values[self.cumulative_promo_mask, :]
+            non_promo_shap_values_reshaped = self.cumulative_shap_values[~self.cumulative_promo_mask, :]
 
             shap.summary_plot(promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
             file_path = f"{output_dir}/shap_summary_plot_promos.png"
@@ -712,11 +717,9 @@ class LagLlamaLightningModule(LightningModule):
             return optimizer
 
 class ShapModelWrapper(nn.Module):
-    def __init__(self, model, loc, scale, dims):
+    def __init__(self, model, dims):
         super(ShapModelWrapper, self).__init__()
         self.model = model
-        self.loc = loc
-        self.scale = scale
         self.dims = dims
 
     def __call__(self, inputs):
@@ -726,7 +729,7 @@ class ShapModelWrapper(nn.Module):
         sliced_params = [
             p[:, -1:] for p in params
         ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
-        distr = self.model.distr_output.distribution(sliced_params, self.loc, self.scale)
+        distr = self.model.distr_output.distribution(sliced_params)
         return distr.mean
     
 # # Define a custom masker function
