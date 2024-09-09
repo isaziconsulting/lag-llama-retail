@@ -49,7 +49,6 @@ from ...gluon_utils.gluon_ts_distributions.implicit_quantile_network import (
 from ...lag_llama.model.module import LagLlamaModel
 from pytorch_lightning.loggers import TensorBoardLogger
 
-
 class LagLlamaLightningModule(LightningModule):
     """
     A ``pl.LightningModule`` class that can be used to train a
@@ -245,12 +244,13 @@ class LagLlamaLightningModule(LightningModule):
 
         # Combine all the labels
         self.feature_names = lag_labels + scaling_labels + time_labels + dynamic_labels
+        self.iter_index = 1
 
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
-            output_dir = "shap_results"
+            output_dir = f"shap_results/batch_{self.iter_index}"
+            self.iter_index += 1
             os.makedirs(output_dir, exist_ok=True)
 
-            shap_model = ShapModelWrapper(self.model)
             with torch.set_grad_enabled(True):
                 inputs, loc, scale = self.model.prepare_input(past_target,
                                                     past_observed_values,
@@ -260,22 +260,46 @@ class LagLlamaLightningModule(LightningModule):
                                                     future_feat_dynamic_real)
             # Create a wrapper for your model
             inputs.requires_grad = True
+            bsz, seq_len, num_feats = inputs.size()
+            inputs = inputs.view(bsz, seq_len * num_feats)
+            # Split into two half size batches
+            bsz = bsz//2
+            train_inputs, test_inputs = inputs[:bsz], inputs[bsz:]
+            shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
+
             with torch.set_grad_enabled(True):
-                explainer = shap.GradientExplainer(shap_model, inputs)
-                shap_values = explainer.shap_values(inputs, nsamples=1000)
+                explainer = shap.GradientExplainer(shap_model, train_inputs)
+                shap_values = explainer.shap_values(test_inputs, nsamples=10240)
+            shap_values_reshaped = shap_values.reshape(bsz * seq_len, num_feats)  # Reshape to (batch_size * context_length, feature_size)
 
             text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
             with open(text_file_path, 'w') as f:
                 for i, label in enumerate(self.feature_names):
-                    shap_value_aggregated = abs(shap_values[:, :, i]).sum()  # Aggregate over time steps
+                    shap_value_aggregated = abs(shap_values_reshaped[:, i]).sum()  # Aggregate over time steps
                     f.write(f'{label} Total SHAP magnitude: {shap_value_aggregated}\n')
 
-            shap_values_reshaped = shap_values.squeeze(-1)  # Remove the last dimension, shape becomes (batch_size, context_length, feature_size)
-            shap_values_reshaped = shap_values_reshaped.reshape(-1, shap_values_reshaped.shape[-1])  # Reshape to (batch_size * context_length, feature_size)
             max_disp=22
-            
+
             shap.summary_plot(shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
-            file_path = f"{output_dir}/shap_summary_plot_bee.png"
+            file_path = f"{output_dir}/shap_summary_plot.png"
+            plt.savefig(file_path, format='png')
+            plt.close()
+
+            # Get promos & non_promos
+            is_promo_dim = self.feature_names.index('is_promo')
+            test_inputs = test_inputs.view(bsz, seq_len, num_feats)
+            promo_mask = test_inputs[..., is_promo_dim] == 1
+            promo_mask = promo_mask.reshape(bsz * seq_len)
+            promo_shap_values_reshaped = shap_values_reshaped[promo_mask, :]
+            non_promo_shap_values_reshaped = shap_values_reshaped[~promo_mask, :]
+
+            shap.summary_plot(promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
+            file_path = f"{output_dir}/shap_summary_plot_promos.png"
+            plt.savefig(file_path, format='png')
+            plt.close()
+
+            shap.summary_plot(non_promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
+            file_path = f"{output_dir}/shap_summary_plot_non_promos.png"
             plt.savefig(file_path, format='png')
             plt.close()
 
@@ -302,20 +326,21 @@ class LagLlamaLightningModule(LightningModule):
         else:
             feat_static_real = None
 
+        t = 0
+        self.log_shap_values(
+                        past_time_feat=past_time_feat if self.time_feat else None,
+                        future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
+                        past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
+                        future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
+                        feat_static_cat=feat_static_cat,
+                        feat_static_real=feat_static_real,
+                        past_target=past_target,
+                        past_observed_values=past_observed_values,
+                        future_target=None
+                    )
+            
         future_samples = []
         for t in range(self.prediction_length):
-            self.log_shap_values(
-                            past_time_feat=past_time_feat if self.time_feat else None,
-                            future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
-                            past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
-                            future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
-                            feat_static_cat=feat_static_cat,
-                            feat_static_real=feat_static_real,
-                            past_target=past_target,
-                            past_observed_values=past_observed_values,
-                            future_target=None
-                        )
-
             params, loc, scale = self.model(
                 *args,
                 past_time_feat=past_time_feat if self.time_feat else None,
@@ -678,14 +703,47 @@ class LagLlamaLightningModule(LightningModule):
             return optimizer
 
 class ShapModelWrapper(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, dims):
         super(ShapModelWrapper, self).__init__()
         self.model = model
+        self.dims = dims
 
     def __call__(self, inputs):
+        (bsz, seq_len, num_feats) = self.dims
+        inputs = inputs.reshape(-1, seq_len, num_feats)
         params = self.model.forward_shap(inputs)
         sliced_params = [
             p[:, -1:] for p in params
         ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
         distr = self.model.distr_output.distribution(sliced_params)
         return distr.mean
+    
+# # Define a custom masker function
+# def custom_masker(mask, X):
+#     """
+#     Custom masker that masks a feature across all timesteps for a sample.
+    
+#     Args:
+#     - X (numpy.array): Input data of shape (num_samples, seq_len, num_features).
+#     - mask (numpy.array or None): Masking array of shape (num_features,). 
+#                                 A 0 value means the feature is masked, 1 means it's not masked.
+    
+#     Returns:
+#     - Masked data (numpy.array): Masked version of X.
+#     """
+#     (bsz, seq_len, num_feats) = dims
+#     mask = mask.reshape(seq_len, num_feats)
+#     if mask is None:
+#         # If no mask is provided, return the input unchanged
+#         return X
+    
+#     # Create a copy of X to apply the mask
+#     masked_X = X.view(seq_len, num_feats).detach().clone()
+    
+#     # Iterate over each sample
+#     for feature_idx in range(num_feats):
+#         if np.any(mask[:, feature_idx] == 0):
+#             # Mask the feature across all timesteps for this sample
+#             masked_X[:, feature_idx] = 0  # Set masked feature to 0 or another value
+    
+#     return masked_X.flatten()
