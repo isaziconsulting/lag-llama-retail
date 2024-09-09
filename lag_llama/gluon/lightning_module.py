@@ -266,9 +266,11 @@ class LagLlamaLightningModule(LightningModule):
             indices = torch.randperm(bsz)
             bsz = bsz//2
             train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
+            test_loc = test_loc[indices[bsz:]]
+            test_scale = test_scale[indices[bsz:]]
 
             # Wrap the model so it's compatble with Shap
-            shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
+            shap_model = ShapModelWrapper(self.model, test_loc, test_scale, (bsz, seq_len, num_feats))
 
             with torch.set_grad_enabled(True):
                 explainer = shap.GradientExplainer(shap_model, train_inputs)
@@ -295,8 +297,7 @@ class LagLlamaLightningModule(LightningModule):
 
             # Get promos & non_promos
             is_promo_dim = self.feature_names.index('is_promo')
-            test_inputs = test_inputs.view(bsz, seq_len, num_feats)
-            promo_mask = test_inputs[..., is_promo_dim] == 1
+            promo_mask = self.cumulative_shap_values.view(bsz, seq_len, num_feats)[..., is_promo_dim] == 1
             promo_mask = promo_mask.reshape(bsz * seq_len)
             promo_shap_values_reshaped = self.cumulative_shap_values[promo_mask, :]
             non_promo_shap_values_reshaped = self.cumulative_shap_values[~promo_mask, :]
@@ -711,9 +712,11 @@ class LagLlamaLightningModule(LightningModule):
             return optimizer
 
 class ShapModelWrapper(nn.Module):
-    def __init__(self, model, dims):
+    def __init__(self, model, loc, scale, dims):
         super(ShapModelWrapper, self).__init__()
         self.model = model
+        self.loc = loc
+        self.scale = scale
         self.dims = dims
 
     def __call__(self, inputs):
@@ -723,7 +726,7 @@ class ShapModelWrapper(nn.Module):
         sliced_params = [
             p[:, -1:] for p in params
         ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
-        distr = self.model.distr_output.distribution(sliced_params)
+        distr = self.model.distr_output.distribution(sliced_params, self.loc, self.scale)
         return distr.mean
     
 # # Define a custom masker function
