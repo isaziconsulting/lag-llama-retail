@@ -245,6 +245,7 @@ class LagLlamaLightningModule(LightningModule):
         # Combine all the labels
         self.feature_names = lag_labels + scaling_labels + time_labels + dynamic_labels
         self.iter_index = 1
+        self.cumulative_shap_values = None
 
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
             output_dir = f"shap_results/batch_{self.iter_index}"
@@ -274,15 +275,20 @@ class LagLlamaLightningModule(LightningModule):
                 shap_values = explainer.shap_values(test_inputs)
             shap_values_reshaped = shap_values.reshape(bsz * seq_len, num_feats)  # Reshape to (batch_size * context_length, feature_size)
 
+            if self.cumulative_shap_values is None:
+                self.cumulative_shap_values = shap_values_reshaped
+            else:
+                self.cumulative_shap_values = torch.cat([self.cumulative_shap_values, shap_values_reshaped])
+
             text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
             with open(text_file_path, 'w') as f:
                 for i, label in enumerate(self.feature_names):
-                    shap_value_aggregated = abs(shap_values_reshaped[:, i]).sum()  # Aggregate over time steps
+                    shap_value_aggregated = abs(self.cumulative_shap_values[:, i]).sum()  # Aggregate over time steps
                     f.write(f'{label} Total SHAP magnitude: {shap_value_aggregated}\n')
 
             max_disp=22
 
-            shap.summary_plot(shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
+            shap.summary_plot(self.cumulative_shap_values, feature_names=self.feature_names, show=False, max_display = max_disp)
             file_path = f"{output_dir}/shap_summary_plot.png"
             plt.savefig(file_path, format='png')
             plt.close()
@@ -292,8 +298,8 @@ class LagLlamaLightningModule(LightningModule):
             test_inputs = test_inputs.view(bsz, seq_len, num_feats)
             promo_mask = test_inputs[..., is_promo_dim] == 1
             promo_mask = promo_mask.reshape(bsz * seq_len)
-            promo_shap_values_reshaped = shap_values_reshaped[promo_mask, :]
-            non_promo_shap_values_reshaped = shap_values_reshaped[~promo_mask, :]
+            promo_shap_values_reshaped = self.cumulative_shap_values[promo_mask, :]
+            non_promo_shap_values_reshaped = self.cumulative_shap_values[~promo_mask, :]
 
             shap.summary_plot(promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
             file_path = f"{output_dir}/shap_summary_plot_promos.png"
