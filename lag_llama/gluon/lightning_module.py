@@ -291,7 +291,7 @@ class LagLlamaLightningModule(LightningModule):
 
             max_disp=22
 
-            shap.summary_plot(self.cumulative_shap_values, feature_names=self.feature_names, show=False, max_display = max_disp)
+            shap.summary_plot(self.cumulative_shap_values, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
             file_path = f"{output_dir}/shap_summary_plot.png"
             plt.savefig(file_path, format='png')
             plt.close()
@@ -307,12 +307,12 @@ class LagLlamaLightningModule(LightningModule):
             promo_shap_values_reshaped = self.cumulative_shap_values[self.cumulative_promo_mask, :]
             non_promo_shap_values_reshaped = self.cumulative_shap_values[~self.cumulative_promo_mask, :]
 
-            shap.summary_plot(promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
+            shap.summary_plot(promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
             file_path = f"{output_dir}/shap_summary_plot_promos.png"
             plt.savefig(file_path, format='png')
             plt.close()
 
-            shap.summary_plot(non_promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp)
+            shap.summary_plot(non_promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
             file_path = f"{output_dir}/shap_summary_plot_non_promos.png"
             plt.savefig(file_path, format='png')
             plt.close()
