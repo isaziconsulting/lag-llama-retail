@@ -278,7 +278,7 @@ class LagLlamaLightningModule(LightningModule):
             if self.cumulative_shap_values is None:
                 self.cumulative_shap_values = shap_values_reshaped
             else:
-                self.cumulative_shap_values = torch.cat([self.cumulative_shap_values, shap_values_reshaped])
+                self.cumulative_shap_values = np.concatenate([self.cumulative_shap_values, shap_values_reshaped])
 
             text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
             with open(text_file_path, 'w') as f:
