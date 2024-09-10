@@ -249,7 +249,7 @@ class LagLlamaLightningModule(LightningModule):
         self.cumulative_promo_mask = None
 
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
-            output_dir = f"shap_results/batch_{self.iter_index}"
+            output_dir = f"shap_results/step_{self.iter_index}"
             self.iter_index += 1
             os.makedirs(output_dir, exist_ok=True)
 
@@ -262,16 +262,25 @@ class LagLlamaLightningModule(LightningModule):
                                                     future_feat_dynamic_real)
             inputs.requires_grad = True
             bsz, seq_len, num_feats = inputs.size()
-            inputs = inputs.view(bsz, seq_len * num_feats)
             # Split into two shuffled half size batches
             indices = torch.randperm(bsz)
             bsz = bsz//2
             train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
+            test_inputs = test_inputs.view(bsz, seq_len * num_feats)
 
             # Wrap the model so it's compatble with Shap
             shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
 
             with torch.set_grad_enabled(True):
+                # Features which should be set to 0 when masked
+                zero_features = ['dow', 'dom', 'doy', 'is_promo', 'promo_strength', 'planned_promo_vol', 'is_multibuy_promo', 'is_single_price_promo']
+                zero_features_indices = [i for i, x in enumerate(self.feature_names) if x in zero_features]
+                train_inputs[..., zero_features_indices] = 0
+                # Features which should be set to 1 when masked
+                one_features = ['rel_prom_prive']
+                one_features_indices = [i for i, x in enumerate(self.feature_names) if x in one_features]
+                train_inputs[..., one_features_indices] = 1
+                train_inputs = train_inputs.view(bsz, seq_len * num_feats)
                 explainer = shap.GradientExplainer(shap_model, train_inputs)
                 shap_values = explainer.shap_values(test_inputs)
             # We only care about the effects of features at a particular time step
