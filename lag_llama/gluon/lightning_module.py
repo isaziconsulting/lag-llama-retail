@@ -244,13 +244,27 @@ class LagLlamaLightningModule(LightningModule):
 
         # Combine all the labels
         self.feature_names = lag_labels + scaling_labels + time_labels + dynamic_labels
-        self.iter_index = 1
+        self.batch_index = 0
+        self.step_index = 0
         self.cumulative_shap_values = None
         self.cumulative_promo_mask = None
+        self.force_plot_features = []
+        self.force_plot_shap_values = []
+        self.force_plot_expected_values = []
 
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
-            output_dir = f"shap_results/step_{self.iter_index}"
-            self.iter_index += 1
+            if self.step_index >= self.prediction_length:
+                self.batch_index += 1
+                self.step_index = 1
+                self.cumulative_shap_values = None
+                self.cumulative_promo_mask = None
+                self.force_plot_features = []
+                self.force_plot_shap_values = []
+                self.force_plot_expected_values = []
+
+            else:
+                self.step_index += 1
+            output_dir = f"shap_results/batch_{self.batch_index}/step_{self.step_index}"
             os.makedirs(output_dir, exist_ok=True)
 
             with torch.set_grad_enabled(True):
@@ -262,30 +276,40 @@ class LagLlamaLightningModule(LightningModule):
                                                     future_feat_dynamic_real)
             inputs.requires_grad = True
             bsz, seq_len, num_feats = inputs.size()
-            # Split into two shuffled half size batches
-            indices = torch.randperm(bsz)
-            bsz = bsz//2
-            train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
-            test_inputs = test_inputs.view(bsz, seq_len * num_feats)
+            # # Split into two shuffled half size batches
+            # indices = torch.randperm(bsz)
+            # bsz = bsz//2
+            # train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
+            test_inputs = inputs.view(bsz, seq_len * num_feats)
 
             # Wrap the model so it's compatble with Shap
             shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
 
             with torch.set_grad_enabled(True):
+                train_inputs = inputs.clone()
                 # Features which should be set to 0 when masked
                 zero_features = ['dow', 'dom', 'doy', 'is_promo', 'promo_strength', 'planned_promo_vol', 'is_multibuy_promo', 'is_single_price_promo']
                 zero_features_indices = [i for i, x in enumerate(self.feature_names) if x in zero_features]
                 train_inputs[..., zero_features_indices] = 0
                 # Features which should be set to 1 when masked
-                one_features = ['rel_prom_prive']
+                one_features = ['rel_promo_price']
                 one_features_indices = [i for i, x in enumerate(self.feature_names) if x in one_features]
                 train_inputs[..., one_features_indices] = 1
+
+                # Get remaining feature indices
+                all_indices = list(range(train_inputs.shape[-1]))
+                remaining_features_indices = [i for i in all_indices if i not in zero_features_indices + one_features_indices]
+
+                # Set remaining features to the mean across the 2nd dimension
+                mean_values = train_inputs.mean(dim=1, keepdim=True)
+                train_inputs[..., remaining_features_indices] = mean_values[..., remaining_features_indices]
+
                 train_inputs = train_inputs.view(bsz, seq_len * num_feats)
                 explainer = shap.GradientExplainer(shap_model, train_inputs)
                 shap_values = explainer.shap_values(test_inputs)
             # We only care about the effects of features at a particular time step
             time_step = -1
-            shap_values_sliced = shap_values.reshape(bsz, seq_len, num_feats)[:, time_step, :]
+            shap_values_sliced = shap_values.reshape(bsz, seq_len, num_feats)[:, time_step, :] * scale.detach().numpy()
 
             if self.cumulative_shap_values is None:
                 self.cumulative_shap_values = shap_values_sliced
@@ -325,6 +349,18 @@ class LagLlamaLightningModule(LightningModule):
             file_path = f"{output_dir}/shap_summary_plot_non_promos.png"
             plt.savefig(file_path, format='png')
             plt.close()
+
+            force_plot_idx = 0
+            features = test_inputs.detach().numpy().reshape(bsz, seq_len, num_feats)[force_plot_idx, time_step, :].round(1)
+            expected_value = (shap_model(test_inputs[force_plot_idx])*scale[force_plot_idx]+loc[force_plot_idx]).detach().numpy().mean()
+
+            self.force_plot_features.append(features)
+            self.force_plot_shap_values.append(shap_values_sliced[force_plot_idx])
+            self.force_plot_expected_values.append(expected_value)
+            
+            force_plot = shap.force_plot(np.mean(self.force_plot_expected_values), np.array(self.force_plot_shap_values), features=np.array(self.force_plot_features), feature_names=self.feature_names, matplotlib=False)
+            file_path = f"{output_dir}/shap_force_plot.html"
+            shap.save_html(file_path, force_plot)
 
     # greedy prediction
     def forward(self, *args, **kwargs):
