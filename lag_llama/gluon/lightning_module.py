@@ -340,19 +340,6 @@ class LagLlamaLightningModule(LightningModule):
         else:
             feat_static_real = None
 
-        t = 0
-        self.log_shap_values(
-                        past_time_feat=past_time_feat if self.time_feat else None,
-                        future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
-                        past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
-                        future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
-                        feat_static_cat=feat_static_cat,
-                        feat_static_real=feat_static_real,
-                        past_target=past_target,
-                        past_observed_values=past_observed_values,
-                        future_target=None
-                    )
-            
         future_samples = []
         for t in range(self.prediction_length):
             params, loc, scale = self.model(
@@ -366,6 +353,18 @@ class LagLlamaLightningModule(LightningModule):
                 past_target=past_target,
                 past_observed_values=past_observed_values,
                 use_kv_cache=self.use_kv_cache,
+            )
+
+            self.log_shap_values(
+                past_time_feat=past_time_feat if self.time_feat else None,
+                future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
+                past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
+                future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
+                feat_static_cat=feat_static_cat,
+                feat_static_real=feat_static_real,
+                past_target=past_target,
+                past_observed_values=past_observed_values,
+                future_target=None
             )
 
             sliced_params = [
