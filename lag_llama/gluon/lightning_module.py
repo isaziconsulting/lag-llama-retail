@@ -252,6 +252,45 @@ class LagLlamaLightningModule(LightningModule):
         self.force_plot_shap_values = []
         self.force_plot_expected_values = []
 
+    def generate_shap_background_data(self, inputs):
+        background_data = inputs.clone()
+        # Features which should be set to 0 when masked (includes volume and lags)
+        zero_features = ['dow', 'dom', 'doy', 'is_promo', 'promo_strength', 'planned_promo_vol', 'is_multibuy_promo', 'is_single_price_promo']
+        zero_features_indices = list(range(len(self.model.lags_seq))) + [i for i, x in enumerate(self.feature_names) if x in zero_features]
+        background_data[..., zero_features_indices] = 0
+        # Features which should be set to 1 when masked
+        one_features = ['rel_promo_price']
+        one_features_indices = [i for i, x in enumerate(self.feature_names) if x in one_features]
+        background_data[..., one_features_indices] = 1
+
+        return background_data
+
+    def interpretable_features(self, inputs, time_step):
+        features = inputs.detach().numpy()[:, time_step, :]
+        time_features = ['dow', 'dom', 'doy']
+        nums = [7, 31, 366]
+        time_feature_indices = [i for i, x in enumerate(self.feature_names) if x in time_features]
+        for index, num in zip(time_feature_indices, nums):
+            features[:, index] = (features[:, index] + 0.5) * (num - 1) + 1
+
+        # Reverse scaling and location encoding
+        scale_features = ['volume iqr', 'planned promo iqr']
+        loc_features = ['volume med', 'planned promo med']
+
+        # Get indices for scale and loc features
+        scale_feature_indices = [i for i, x in enumerate(self.feature_names) if x in scale_features]
+        loc_feature_indices = [i for i, x in enumerate(self.feature_names) if x in loc_features]
+
+        # Apply inverse transformation for scale features (log encoding)
+        for index in scale_feature_indices:
+            features[:, index] = np.exp(features[:, index])
+
+        # Apply inverse transformation for loc features (log1p encoding)
+        for index in loc_feature_indices:
+            features[:, index] = np.exp(features[:, index]) - 1
+        
+        return features.round(1)
+
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
             if self.step_index >= self.prediction_length:
                 self.batch_index += 1
@@ -276,40 +315,21 @@ class LagLlamaLightningModule(LightningModule):
                                                     future_feat_dynamic_real)
             inputs.requires_grad = True
             bsz, seq_len, num_feats = inputs.size()
-            # # Split into two shuffled half size batches
-            # indices = torch.randperm(bsz)
-            # bsz = bsz//2
-            # train_inputs, test_inputs = inputs[indices[:bsz]], inputs[indices[bsz:]]
-            test_inputs = inputs.view(bsz, seq_len * num_feats)
 
             # Wrap the model so it's compatble with Shap
-            shap_model = ShapModelWrapper(self.model, (bsz, seq_len, num_feats))
+            nsamples = 200
+            shap_batch_size = 50
+            background_data = self.generate_shap_background_data(inputs).view(-1, seq_len * num_feats)
+            shap_model = ShapModelWrapper(self.model, dims=(bsz, seq_len, num_feats))
 
+            inputs_reshaped = inputs.view(bsz, seq_len * num_feats)
             with torch.set_grad_enabled(True):
-                train_inputs = inputs.clone()
-                # Features which should be set to 0 when masked
-                zero_features = ['dow', 'dom', 'doy', 'is_promo', 'promo_strength', 'planned_promo_vol', 'is_multibuy_promo', 'is_single_price_promo']
-                zero_features_indices = [i for i, x in enumerate(self.feature_names) if x in zero_features]
-                train_inputs[..., zero_features_indices] = 0
-                # Features which should be set to 1 when masked
-                one_features = ['rel_promo_price']
-                one_features_indices = [i for i, x in enumerate(self.feature_names) if x in one_features]
-                train_inputs[..., one_features_indices] = 1
-
-                # Get remaining feature indices
-                all_indices = list(range(train_inputs.shape[-1]))
-                remaining_features_indices = [i for i in all_indices if i not in zero_features_indices + one_features_indices]
-
-                # Set remaining features to the mean across the 2nd dimension
-                mean_values = train_inputs.mean(dim=1, keepdim=True)
-                train_inputs[..., remaining_features_indices] = mean_values[..., remaining_features_indices]
-
-                train_inputs = train_inputs.view(bsz, seq_len * num_feats)
-                explainer = shap.GradientExplainer(shap_model, train_inputs)
-                shap_values = explainer.shap_values(test_inputs)
-            # We only care about the effects of features at a particular time step
+                explainer = shap.GradientExplainer(shap_model, background_data, batch_size=shap_batch_size)
+                # Reshape to shuffle sequene dim into feature dim
+                shap_values = explainer.shap_values(inputs_reshaped, nsamples=nsamples)
+            # We only care about the effects of features at the most recent time step
             time_step = -1
-            shap_values_sliced = shap_values.reshape(bsz, seq_len, num_feats)[:, time_step, :] * scale.detach().numpy()
+            shap_values_sliced = shap_values.reshape(bsz, seq_len, num_feats)[:, time_step, :]
 
             if self.cumulative_shap_values is None:
                 self.cumulative_shap_values = shap_values_sliced
@@ -331,7 +351,7 @@ class LagLlamaLightningModule(LightningModule):
 
             # Get promos & non_promos
             is_promo_dim = self.feature_names.index('is_promo')
-            promo_mask = test_inputs.view(bsz, seq_len, num_feats)[:, time_step, is_promo_dim] == 1
+            promo_mask = inputs[:, time_step, is_promo_dim] == 1
             promo_mask = promo_mask.squeeze()
             if self.cumulative_promo_mask is None:
                 self.cumulative_promo_mask = promo_mask
@@ -351,11 +371,11 @@ class LagLlamaLightningModule(LightningModule):
             plt.close()
 
             force_plot_idx = 0
-            features = test_inputs.detach().numpy().reshape(bsz, seq_len, num_feats)[force_plot_idx, time_step, :].round(1)
-            expected_value = (shap_model(test_inputs[force_plot_idx])*scale[force_plot_idx]+loc[force_plot_idx]).detach().numpy().mean()
+            features = self.interpretable_features(inputs, time_step)[force_plot_idx]
+            expected_value = (shap_model(inputs_reshaped)*scale[force_plot_idx]+loc[force_plot_idx]).detach().numpy().mean()
 
             self.force_plot_features.append(features)
-            self.force_plot_shap_values.append(shap_values_sliced[force_plot_idx])
+            self.force_plot_shap_values.append(shap_values_sliced[force_plot_idx] * scale[force_plot_idx].detach().numpy())
             self.force_plot_expected_values.append(expected_value)
             
             force_plot = shap.force_plot(np.mean(self.force_plot_expected_values), np.array(self.force_plot_shap_values), features=np.array(self.force_plot_features), feature_names=self.feature_names, matplotlib=False)
