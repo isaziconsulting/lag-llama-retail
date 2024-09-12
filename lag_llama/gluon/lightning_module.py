@@ -301,17 +301,19 @@ class LagLlamaLightningModule(LightningModule):
 
         return features.round(1)
 
-    def store_shap_data(self, filename, item_id, feature_values, shap_values):
+    def store_shap_data(self, filename, item_id, feature_values, expected_values, shap_values):
         (bsz, seq_len, num_feats) = feature_values.shape
 
         data_list = []
         for i in range(bsz):
             for t in range(seq_len):
                 for f in range(num_feats):
-                    data_list.append([item_id[i], t, self.feature_names[f], feature_values[i, t, f], shap_values[i, t, f]])
+                    data_list.append([item_id[i], t, self.feature_names[f], feature_values[i, t, f],
+                                      expected_values[i], shap_values[i, t, f]])
 
         # Convert to DataFrame
-        df = pd.DataFrame(data_list, columns=['item_id', 'time_step', 'feature_name', 'feature_value', 'shap_value'])
+        df = pd.DataFrame(data_list, columns=['item_id', 'time_step', 'feature_name', 'feature_value',
+                                              'expected_value', 'shap_value'])
 
         # Save as CSV
         df.to_csv(filename, index=False)
@@ -324,7 +326,6 @@ class LagLlamaLightningModule(LightningModule):
                 self.cumulative_promo_mask = None
                 self.force_plot_features = []
                 self.force_plot_shap_values = []
-                self.force_plot_expected_values = []
             else:
                 self.step_index += 1
 
@@ -371,14 +372,13 @@ class LagLlamaLightningModule(LightningModule):
                 plt.savefig(file_path, format='png')
                 plt.close()
                 
-                expected_value = shap_model(background_data).detach().numpy().mean()
+                expected_values = (shap_model(background_data).mean() * scale + loc).squeeze().detach().numpy()
                 # Switch from (seq_len, bsz, features) to (bsz, seq_len, features)
                 features = np.array(self.force_plot_features).transpose(1, 0, 2)
                 shap_values = np.array(self.force_plot_shap_values).transpose(1, 0, 2)
-                self.store_shap_data(f"{output_dir}/shap_data.csv", item_id, features, shap_values)
+                self.store_shap_data(f"{output_dir}/shap_data.csv", item_id, features, expected_values, shap_values)
                 for item_index in range(bsz):
-                    scaled_expected_value = (expected_value*scale[item_index]+loc[item_index]).detach().numpy()
-                    force_plot = shap.force_plot(scaled_expected_value,
+                    force_plot = shap.force_plot(expected_values[item_index],
                                                  shap_values[item_index],
                                                  features=features[item_index],
                                                  feature_names=self.feature_names)

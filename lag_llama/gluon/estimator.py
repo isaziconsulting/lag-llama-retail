@@ -315,7 +315,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
 
         return Chain(transforms)
 
-    def create_lightning_module(self, use_kv_cache: bool = False) -> pl.LightningModule:
+    def create_lightning_module(self, use_kv_cache: bool = False, enable_shap: bool = False) -> pl.LightningModule:
         model_kwargs = {
             "input_size": self.input_size,
             "context_length": self.context_length,
@@ -370,6 +370,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 window_warp_window_ratio=self.window_warp_window_ratio,
                 window_warp_scales=self.window_warp_scales,
                 use_kv_cache=use_kv_cache,
+                enable_shap=enable_shap,
                 data_id_to_name_map=self.data_id_to_name_map,
                 use_cosine_annealing_lr=self.use_cosine_annealing_lr,
                 cosine_annealing_lr_args=self.cosine_annealing_lr_args,
