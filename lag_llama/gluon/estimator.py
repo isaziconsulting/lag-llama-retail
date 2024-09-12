@@ -58,7 +58,8 @@ PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
     "feat_static_real",
     "past_feat_dynamic_real",
-    "future_feat_dynamic_real"
+    "future_feat_dynamic_real",
+    "item_id"
 ]
 TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
     "future_target",

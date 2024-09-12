@@ -108,6 +108,8 @@ class LagLlamaLightningModule(LightningModule):
         track_loss_per_series: bool = False,
         nonnegative_pred_samples: bool = False,
         use_kv_cache: bool = True,
+        enable_shap = False,
+        enable_embed_layer_logging = False,
         model_config=None,
         dataset_configs=[]
     ):
@@ -160,7 +162,10 @@ class LagLlamaLightningModule(LightningModule):
         # item_id based - to be used only in single-dataset mode
         self.train_loss_dict_per_series = {}
         self.val_loss_dict_per_series = {}
+        assert not (use_kv_cache and enable_shap), "Cannot enable kv_cache while generating shap values"
         self.use_kv_cache = use_kv_cache
+        self.enable_shap = enable_shap
+        self.enable_embed_layer_logging = enable_embed_layer_logging
         self.transforms = []
         aug_probs = dict(
             Jitter=dict(prob=self.jitter_prob, sigma=self.jitter_sigma),
@@ -255,7 +260,7 @@ class LagLlamaLightningModule(LightningModule):
     def get_feature_indices(self, feature_names):
         return [i for i, x in enumerate(self.feature_names) if x in feature_names]
 
-    def generate_shap_background_data(self, inputs):
+    def compute_shap_background_data(self, inputs):
         background_data = inputs.clone()
         dataset_config = self.dataset_configs[0]
         # Features which should be set to 1 when masked
@@ -311,7 +316,7 @@ class LagLlamaLightningModule(LightningModule):
         # Save as CSV
         df.to_csv(filename, index=False)
 
-    def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, item_id):
+    def compute_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, item_id):
             if self.step_index >= self.prediction_length:
                 self.batch_index += 1
                 self.step_index = 1
@@ -336,7 +341,7 @@ class LagLlamaLightningModule(LightningModule):
             # Wrap the model so it's compatble with Shap
             nsamples = 200
             shap_batch_size = 50
-            background_data = self.generate_shap_background_data(inputs).view(-1, seq_len * num_feats)
+            background_data = self.compute_shap_background_data(inputs).view(-1, seq_len * num_feats)
             shap_model = ShapModelWrapper(self.model, dims=(bsz, seq_len, num_feats))
 
             inputs_reshaped = inputs.view(bsz, seq_len * num_feats)
@@ -421,15 +426,16 @@ class LagLlamaLightningModule(LightningModule):
                 use_kv_cache=self.use_kv_cache,
             )
 
-            self.log_shap_values(
-                past_time_feat=past_time_feat if self.time_feat else None,
-                future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
-                past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
-                future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
-                past_target=past_target,
-                past_observed_values=past_observed_values,
-                item_id=item_id
-            )
+            if self.enable_shap:
+                self.compute_shap_values(
+                    past_time_feat=past_time_feat if self.time_feat else None,
+                    future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
+                    past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
+                    future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
+                    past_target=past_target,
+                    past_observed_values=past_observed_values,
+                    item_id=item_id
+                )
 
             sliced_params = [
                 p[:, -1:] for p in params
@@ -683,7 +689,8 @@ class LagLlamaLightningModule(LightningModule):
         return train_loss_avg
 
     def on_train_epoch_end(self):
-        self.log_token_embed_layer()
+        if self.enable_embed_layer_logging:
+            self.log_token_embed_layer()
         # Log all losses
         for key, value in self.train_loss_dict.items():
             loss_avg = np.mean(value)
