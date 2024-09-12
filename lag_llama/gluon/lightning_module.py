@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import io
 from PIL import Image
 import shap
+import pandas as pd
 
 from lightning import LightningModule
 import torch
@@ -248,10 +249,8 @@ class LagLlamaLightningModule(LightningModule):
         self.batch_index = 0
         self.step_index = 0
         self.cumulative_shap_values = None
-        self.cumulative_promo_mask = None
         self.force_plot_features = []
         self.force_plot_shap_values = []
-        self.force_plot_expected_values = []
 
     def get_feature_indices(self, feature_names):
         return [i for i, x in enumerate(self.feature_names) if x in feature_names]
@@ -297,7 +296,22 @@ class LagLlamaLightningModule(LightningModule):
 
         return features.round(1)
 
-    def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
+    def store_shap_data(self, filename, item_id, feature_values, shap_values):
+        (bsz, seq_len, num_feats) = feature_values.shape
+
+        data_list = []
+        for i in range(bsz):
+            for t in range(seq_len):
+                for f in range(num_feats):
+                    data_list.append([item_id[i], t, self.feature_names[f], feature_values[i, t, f], shap_values[i, t, f]])
+
+        # Convert to DataFrame
+        df = pd.DataFrame(data_list, columns=['item_id', 'time_step', 'feature_name', 'feature_value', 'shap_value'])
+
+        # Save as CSV
+        df.to_csv(filename, index=False)
+
+    def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, item_id):
             if self.step_index >= self.prediction_length:
                 self.batch_index += 1
                 self.step_index = 1
@@ -306,11 +320,8 @@ class LagLlamaLightningModule(LightningModule):
                 self.force_plot_features = []
                 self.force_plot_shap_values = []
                 self.force_plot_expected_values = []
-
             else:
                 self.step_index += 1
-            output_dir = f"shap_results/dischem/batch_{self.batch_index}/step_{self.step_index}"
-            os.makedirs(output_dir, exist_ok=True)
 
             with torch.set_grad_enabled(True):
                 inputs, loc, scale = self.model.prepare_input(past_target,
@@ -342,54 +353,38 @@ class LagLlamaLightningModule(LightningModule):
             else:
                 self.cumulative_shap_values = np.concatenate([self.cumulative_shap_values, shap_values_sliced])
 
-            text_file_path = os.path.join(output_dir, "shap_aggregated_values.txt")
-            with open(text_file_path, 'w') as f:
-                for i, label in enumerate(self.feature_names):
-                    shap_value_aggregated = abs(self.cumulative_shap_values[:, i]).sum()  # Aggregate over samples
-                    f.write(f'{label} Total SHAP magnitude: {shap_value_aggregated}\n')
+            self.force_plot_features.append(self.interpretable_features(inputs, time_step))
+            self.force_plot_shap_values.append(shap_values_sliced * scale.detach().numpy())
 
-            max_disp=len(self.feature_names)
+            # Record the shap values only when we finish a sequence
+            if self.step_index >= self.prediction_length:
+                output_dir = f"shap_results/dischem/batch_{self.batch_index}"
+                os.makedirs(output_dir, exist_ok=True)
 
-            shap.summary_plot(self.cumulative_shap_values, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
-            file_path = f"{output_dir}/shap_summary_plot.png"
-            plt.savefig(file_path, format='png')
-            plt.close()
-
-            # Get promos & non_promos
-            is_promo_dim = self.feature_names.index('is_promo')
-            promo_mask = inputs[:, time_step, is_promo_dim] == 1
-            promo_mask = promo_mask.squeeze()
-            if self.cumulative_promo_mask is None:
-                self.cumulative_promo_mask = promo_mask
-            else:
-                self.cumulative_promo_mask = np.concatenate([self.cumulative_promo_mask, promo_mask])
-            promo_shap_values_reshaped = self.cumulative_shap_values[self.cumulative_promo_mask, :]
-            non_promo_shap_values_reshaped = self.cumulative_shap_values[~self.cumulative_promo_mask, :]
-
-            shap.summary_plot(promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
-            file_path = f"{output_dir}/shap_summary_plot_promos.png"
-            plt.savefig(file_path, format='png')
-            plt.close()
-
-            shap.summary_plot(non_promo_shap_values_reshaped, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
-            file_path = f"{output_dir}/shap_summary_plot_non_promos.png"
-            plt.savefig(file_path, format='png')
-            plt.close()
-
-            force_plot_idx = 0
-            features = self.interpretable_features(inputs, time_step)[force_plot_idx]
-            expected_value = (shap_model(inputs_reshaped)*scale[force_plot_idx]+loc[force_plot_idx]).detach().numpy().mean()
-
-            self.force_plot_features.append(features)
-            self.force_plot_shap_values.append(shap_values_sliced[force_plot_idx] * scale[force_plot_idx].detach().numpy())
-            self.force_plot_expected_values.append(expected_value)
-            
-            force_plot = shap.force_plot(np.mean(self.force_plot_expected_values), np.array(self.force_plot_shap_values), features=np.array(self.force_plot_features), feature_names=self.feature_names, matplotlib=False)
-            file_path = f"{output_dir}/shap_force_plot.html"
-            shap.save_html(file_path, force_plot)
+                shap.summary_plot(self.cumulative_shap_values, feature_names=self.feature_names, show=False, max_display=len(self.feature_names), use_log_scale=True)
+                file_path = f"{output_dir}/shap_summary_plot.png"
+                plt.savefig(file_path, format='png')
+                plt.close()
+                
+                expected_value = shap_model(background_data).detach().numpy().mean()
+                # Switch from (seq_len, bsz, features) to (bsz, seq_len, features)
+                features = np.array(self.force_plot_features).transpose(1, 0, 2)
+                shap_values = np.array(self.force_plot_shap_values).transpose(1, 0, 2)
+                self.store_shap_data(f"{output_dir}/shap_data.csv", item_id, features, shap_values)
+                for item_index in range(bsz):
+                    scaled_expected_value = (expected_value*scale[item_index]+loc[item_index]).detach().numpy()
+                    force_plot = shap.force_plot(scaled_expected_value,
+                                                 shap_values[item_index],
+                                                 features=features[item_index],
+                                                 feature_names=self.feature_names)
+                    file_path = f"{output_dir}/shap_force_plot_{item_index}.html"
+                shap.save_html(file_path, force_plot)
 
     # greedy prediction
     def forward(self, *args, **kwargs):
+        item_id = kwargs[
+            "item_id"
+        ] #(bsz)
         past_target = kwargs[
             "past_target"
         ]  # (bsz, model.context_length+max(model.lags_seq))
@@ -431,11 +426,9 @@ class LagLlamaLightningModule(LightningModule):
                 future_time_feat=future_time_feat[..., : t + 1, :] if self.time_feat else None,
                 past_feat_dynamic_real=past_feat_dynamic_real if self.num_feat_dynamic_real else None,
                 future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if self.num_feat_dynamic_real else None,
-                feat_static_cat=feat_static_cat,
-                feat_static_real=feat_static_real,
                 past_target=past_target,
                 past_observed_values=past_observed_values,
-                future_target=None
+                item_id=item_id
             )
 
             sliced_params = [
@@ -459,7 +452,7 @@ class LagLlamaLightningModule(LightningModule):
             (-1, self.model.num_parallel_samples, self.prediction_length)
             + self.model.distr_output.event_shape,
         )
-    
+
     # train
     def _compute_loss(self, batch, do_not_average=False, return_observed_values=False, validating=False):
         past_target = batch[
