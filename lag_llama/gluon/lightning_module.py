@@ -378,7 +378,7 @@ class LagLlamaLightningModule(LightningModule):
                                                  features=features[item_index],
                                                  feature_names=self.feature_names)
                     file_path = f"{output_dir}/shap_force_plot_{item_index}.html"
-                shap.save_html(file_path, force_plot)
+                    shap.save_html(file_path, force_plot)
 
     # greedy prediction
     def forward(self, *args, **kwargs):
