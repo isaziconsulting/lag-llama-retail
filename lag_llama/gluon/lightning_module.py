@@ -227,23 +227,24 @@ class LagLlamaLightningModule(LightningModule):
         self.augmentations = ApplyAugmentations(self.transforms)
 
         # Lags (target and lag indices)
-        lag_labels = ['volume'] + [f'lag {lag}' for lag in self.model.lags_seq[1:]]
+        self.lag_labels = ['volume'] + [f'lag {lag}' for lag in self.model.lags_seq[1:]]
 
         # Scaling feature labels
-        scaling_labels = ['volume med', 'volume iqr', 'planned promo med', 'planned promo iqr']
+        dataset_config = dataset_configs[0]
+        self.features_to_scale = ['volume'] + dataset_config['scale_feat_dynamic_real_cols']
+        self.scale_labels = [f"{feature} iqr" for feature in self.features_to_scale]
+        self.loc_labels = [f"{feature} med" for feature in self.features_to_scale]
 
         # Time feature labels
-        time_labels = ['dow', 'dom', 'doy']
+        self.time_labels = ['dow', 'dom', 'doy']
 
         # Dynamic feature labels (hardcoded)
-        dynamic_labels = [
-            'rel_promo_price', 'is_promo', 'promo_strength', 
-            'is_single_price_promo', 'is_multibuy_promo', 
-            'rel_price', 'planned_promo_vol'
-        ]
+        self.dynamic_labels = dataset_config['feat_dynamic_real_cols']
 
-        # Combine all the labels
-        self.feature_names = lag_labels + scaling_labels + time_labels + dynamic_labels
+        # Combine all the labels in the actual orders used by the model
+        # scaling features alternate between loc and scale (e.g. volume med, volume iqr, ...)
+        ordered_scaling_feats = [item for pair in zip(self.loc_labels, self.scale_labels) for item in pair]
+        self.feature_names = self.lag_labels + ordered_scaling_feats + self.time_labels + self.dynamic_labels
         self.batch_index = 0
         self.step_index = 0
         self.cumulative_shap_values = None
@@ -252,43 +253,48 @@ class LagLlamaLightningModule(LightningModule):
         self.force_plot_shap_values = []
         self.force_plot_expected_values = []
 
+    def get_feature_indices(self, feature_names):
+        return [i for i, x in enumerate(self.feature_names) if x in feature_names]
+
     def generate_shap_background_data(self, inputs):
         background_data = inputs.clone()
-        # Features which should be set to 0 when masked (includes volume and lags)
-        zero_features = ['dow', 'dom', 'doy', 'is_promo', 'promo_strength', 'planned_promo_vol', 'is_multibuy_promo', 'is_single_price_promo']
-        zero_features_indices = list(range(len(self.model.lags_seq))) + [i for i, x in enumerate(self.feature_names) if x in zero_features]
-        background_data[..., zero_features_indices] = 0
+        dataset_config = self.dataset_configs[0]
         # Features which should be set to 1 when masked
-        one_features = ['rel_promo_price']
-        one_features_indices = [i for i, x in enumerate(self.feature_names) if x in one_features]
-        background_data[..., one_features_indices] = 1
-
+        one_features = dataset_config['fill_with_one_cols']
+        background_data[..., self.get_feature_indices(one_features)] = 1
+        # Features which should be set to 0 when masked (includes volume, lags, time features and all other dynamic features)
+        zero_features = self.lag_labels + self.time_labels + [
+            feature for feature in dataset_config['feat_dynamic_real_cols']
+            if feature not in (dataset_config['fill_forward_cols'] + one_features)
+        ]
+        background_data[..., self.get_feature_indices(zero_features)] = 0
         return background_data
 
     def interpretable_features(self, inputs, time_step):
         features = inputs.detach().numpy()[:, time_step, :]
-        time_features = ['dow', 'dom', 'doy']
+        time_features = self.get_feature_indices(self.time_labels)
         nums = [7, 31, 366]
-        time_feature_indices = [i for i, x in enumerate(self.feature_names) if x in time_features]
-        for index, num in zip(time_feature_indices, nums):
+        for index, num in zip(time_features, nums):
             features[:, index] = (features[:, index] + 0.5) * (num - 1) + 1
 
         # Reverse scaling and location encoding
-        scale_features = ['volume iqr', 'planned promo iqr']
-        loc_features = ['volume med', 'planned promo med']
-
-        # Get indices for scale and loc features
-        scale_feature_indices = [i for i, x in enumerate(self.feature_names) if x in scale_features]
-        loc_feature_indices = [i for i, x in enumerate(self.feature_names) if x in loc_features]
+        scale_features = self.get_feature_indices(self.scale_labels)
+        loc_features = self.get_feature_indices(self.loc_labels)
+        features_to_scale = self.get_feature_indices(self.features_to_scale)
 
         # Apply inverse transformation for scale features (log encoding)
-        for index in scale_feature_indices:
-            features[:, index] = np.exp(features[:, index])
+        features[:, scale_features] = np.exp(features[:, scale_features])
 
         # Apply inverse transformation for loc features (log1p encoding)
-        for index in loc_feature_indices:
-            features[:, index] = np.exp(features[:, index]) - 1
-        
+        features[:, loc_features] = np.exp(features[:, loc_features]) - 1
+
+        # Scale the volume & planned promo volume back up
+        features[:, features_to_scale] *= features[:, scale_features]
+
+        # Also scale the lagged volume up by the volume's scale
+        lag_indices = self.get_feature_indices(self.lag_labels)[1:] # ignore lag 0
+        features[:, lag_indices] *= features[:, scale_features[0]][:, np.newaxis]
+
         return features.round(1)
 
     def log_shap_values(self, past_target, past_observed_values, past_time_feat, future_time_feat, past_feat_dynamic_real, future_feat_dynamic_real, feat_static_cat, feat_static_real, future_target):
@@ -303,7 +309,7 @@ class LagLlamaLightningModule(LightningModule):
 
             else:
                 self.step_index += 1
-            output_dir = f"shap_results/batch_{self.batch_index}/step_{self.step_index}"
+            output_dir = f"shap_results/dischem/batch_{self.batch_index}/step_{self.step_index}"
             os.makedirs(output_dir, exist_ok=True)
 
             with torch.set_grad_enabled(True):
@@ -342,7 +348,7 @@ class LagLlamaLightningModule(LightningModule):
                     shap_value_aggregated = abs(self.cumulative_shap_values[:, i]).sum()  # Aggregate over samples
                     f.write(f'{label} Total SHAP magnitude: {shap_value_aggregated}\n')
 
-            max_disp=22
+            max_disp=len(self.feature_names)
 
             shap.summary_plot(self.cumulative_shap_values, feature_names=self.feature_names, show=False, max_display = max_disp, use_log_scale=True)
             file_path = f"{output_dir}/shap_summary_plot.png"
@@ -795,33 +801,3 @@ class ShapModelWrapper(nn.Module):
         ]  # Take the last timestep predicted. Each tensor is of shape (#bsz*#parallel_samples, 1)
         distr = self.model.distr_output.distribution(sliced_params)
         return distr.mean
-    
-# # Define a custom masker function
-# def custom_masker(mask, X):
-#     """
-#     Custom masker that masks a feature across all timesteps for a sample.
-    
-#     Args:
-#     - X (numpy.array): Input data of shape (num_samples, seq_len, num_features).
-#     - mask (numpy.array or None): Masking array of shape (num_features,). 
-#                                 A 0 value means the feature is masked, 1 means it's not masked.
-    
-#     Returns:
-#     - Masked data (numpy.array): Masked version of X.
-#     """
-#     (bsz, seq_len, num_feats) = dims
-#     mask = mask.reshape(seq_len, num_feats)
-#     if mask is None:
-#         # If no mask is provided, return the input unchanged
-#         return X
-    
-#     # Create a copy of X to apply the mask
-#     masked_X = X.view(seq_len, num_feats).detach().clone()
-    
-#     # Iterate over each sample
-#     for feature_idx in range(num_feats):
-#         if np.any(mask[:, feature_idx] == 0):
-#             # Mask the feature across all timesteps for this sample
-#             masked_X[:, feature_idx] = 0  # Set masked feature to 0 or another value
-    
-#     return masked_X.flatten()
