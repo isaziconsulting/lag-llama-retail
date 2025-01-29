@@ -562,7 +562,7 @@ class LagLlamaModel(nn.Module):
         )  # Lags are added as an extra dim. Shape is (bsz, context_length+(pred_len-1), len(self.lags_seq))
 
         target_scaling_feat = torch.cat(
-            (loc.abs().log1p(), scale.log()), dim=-1
+            (loc.abs().log1p(), scale.log1p()), dim=-1
         )  # (bsz, 2) (loc and scale are concatenated)
 
         expanded_target_scaling_feat = unsqueeze_expand(
@@ -609,7 +609,7 @@ class LagLlamaModel(nn.Module):
             if self.scale_feat_indices:
                 batch_size = target_scaling_feat.size(0)
                 cov_scaling_feat = torch.cat(
-                    (feat_loc.abs().log1p().view(batch_size, -1), feat_scale.log().view(batch_size, -1)), dim=-1
+                    (feat_loc.abs().log1p().view(batch_size, -1), feat_scale.log1p().view(batch_size, -1)), dim=-1
                 )  # (bsz, 2 * len(self.scale_feat_indices))
                 expanded_cov_scaling_feat = unsqueeze_expand(
                     cov_scaling_feat, dim=-2, size=lags.shape[-2]
