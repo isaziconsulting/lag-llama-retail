@@ -36,21 +36,37 @@ class LTSMConfig:
     rope_scaling: Optional[dict] = None
     dropout: float = 0.0
 
+class EncoderBlock(nn.Module):
+    def __init__(self, config: LTSMConfig) -> None:
+        super().__init__()
+        self.rms_1 = RMSNorm(config.n_embd_per_head * config.n_head)
+        self.self_attn = CausalMultiHeadAttention(config)
+        self.rms_2 = RMSNorm(config.n_embd_per_head * config.n_head)
+        self.mlp = MLP(config)
+        self.rms_3 = RMSNorm(config.n_embd_per_head * config.n_head)
 
-class Block(nn.Module):
+    def forward(self, x: torch.Tensor, use_kv_cache: bool) -> torch.Tensor:
+        x = x + self.self_attn(self.rms_1(x), context=None, use_kv_cache=use_kv_cache)
+        
+        y = x + self.mlp(self.rms_2(x))
+        # Output must be normalised as it is fed straight to multi-head attention in the decoder
+        return self.rms_3(y)
+
+class DecoderBlock(nn.Module):
     def __init__(self, config: LTSMConfig) -> None:
         super().__init__()
         self.rms_1 = RMSNorm(config.n_embd_per_head * config.n_head)
         self.self_attn = CausalMultiHeadAttention(config)
         self.rms_2 = RMSNorm(config.n_embd_per_head * config.n_head)
         self.cross_attn = CausalMultiHeadAttention(config)
+        self.cross_attn.rotary_emb = None # Cross attention doesn't use rotary embeddings
         self.rms_3 = RMSNorm(config.n_embd_per_head * config.n_head)
         self.mlp = MLP(config)
 
-    def forward(self, x: torch.Tensor, x_cov_norm: torch.Tensor, use_kv_cache: bool) -> torch.Tensor:
-        x = x + self.self_attn(self.rms_1(x), x_cov=None, use_kv_cache=use_kv_cache)
+    def forward(self, x: torch.Tensor, context: torch.Tensor, use_kv_cache: bool) -> torch.Tensor:
+        x = x + self.self_attn(self.rms_1(x), context=None, use_kv_cache=use_kv_cache)
         
-        x = x + self.cross_attn(self.rms_2(x), x_cov=x_cov_norm, use_kv_cache=use_kv_cache)
+        x = x + self.cross_attn(self.rms_2(x), context=context, use_kv_cache=use_kv_cache)
         y = x + self.mlp(self.rms_3(x))
         return y
 
@@ -286,16 +302,16 @@ class CausalMultiHeadAttention(nn.Module):
                     f"`rope_scaling`'s factor field must be an float >= 1, got {rope_scaling_factor}"
                 )
 
-    def forward(self, x: torch.Tensor, x_cov: torch.Tensor, use_kv_cache: bool) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, context: torch.Tensor, use_kv_cache: bool) -> torch.Tensor:
         # batch size, sequence length, embedding dimensionality (n_embd)
         (B, T, C) = x.size()
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q = self.q_proj(x)
-        if x_cov is None:
+        if context is None:
             k, v = self.kv_proj(x).split(self.n_embd_per_head * self.n_head, dim=2)
         else:
-            k, v = self.kv_proj(x_cov).split(self.n_embd_per_head * self.n_head, dim=2)
+            k, v = self.kv_proj(context).split(self.n_embd_per_head * self.n_head, dim=2)
 
         k = k.view(B, -1, self.n_head, self.n_embd_per_head).transpose(
             1, 2
@@ -491,9 +507,9 @@ class LagLlamaModel(nn.Module):
         self.transformer = nn.ModuleDict(
             dict(
                 target_embed = nn.Linear(target_feature_size, num_embed_dims),
-                # Covariate embedding is reused by all blocks so we can do a once-off RMSNorm here
-                cov_norm_embed = nn.Sequential(nn.Linear(cov_feature_size, num_embed_dims), RMSNorm(num_embed_dims)),
-                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                context_embed = nn.Linear(cov_feature_size, num_embed_dims),
+                encoder=nn.ModuleList([EncoderBlock(config) for _ in range(config.n_layer)]),
+                decoder=nn.ModuleList([DecoderBlock(config) for _ in range(config.n_layer)]),
                 ln_f=RMSNorm(num_embed_dims),
             )
         )
@@ -508,19 +524,6 @@ class LagLlamaModel(nn.Module):
             torch.nn.init.normal_(
                 module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer)
             )
-
-    def load_partial_weights(self, partial_weights_ckpt_path, device, freeze_transformer=False) -> None:
-        checkpoint = torch.load(partial_weights_ckpt_path, device)
-        # Remove the 'model.' prefix from the keys and filter only the transformer layers (excluding embedding layers) and distribution head layer
-        valid_keys = ['transformer.h', 'transformer.ln_f']
-        filtered_state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items() if any(substring in k for substring in valid_keys)}
-        self.load_state_dict(filtered_state_dict, strict=False)
-
-        if freeze_transformer:
-            # Freeze the transform layers that were loaded
-            for name, param in self.named_parameters():
-                if 'transformer.h' in name or 'transformer.ln_f' in name:
-                    param.requires_grad = False
 
     def prepare_input(
         self,
@@ -676,7 +679,7 @@ class LagLlamaModel(nn.Module):
         use_kv_cache: bool = False,
     ) -> torch.Tensor:
         # if past_time_feat is not None:
-        target_input, cov_input, loc, scale = self.prepare_input(
+        target_input, context_input, loc, scale = self.prepare_input(
             past_target=past_target,
             past_observed_values=past_observed_values,
             future_target=future_target,
@@ -691,19 +694,23 @@ class LagLlamaModel(nn.Module):
         if use_kv_cache and self.y_cache:
             # Only use the most recent one, rest is in cache
             target_input = target_input[:, -1:]
-            cov_input = cov_input[:, -1:]
+            context_input = context_input[:, -1:]
 
         # Get token embeddings
         x = self.transformer.target_embed(
             target_input
         )  # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
 
-        x_cov_norm = self.transformer.cov_norm_embed(
-            cov_input
+        context = self.transformer.context_embed(
+            context_input
         )  # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
 
-        for block in self.transformer.h:
-            x = block(x, x_cov_norm, use_kv_cache)
+
+        for encoder_block in self.transformer.encoder:
+            context = encoder_block(context, use_kv_cache)
+
+        for decoder_block in self.transformer.decoder:
+            x = decoder_block(x, context, use_kv_cache)
         x = self.transformer.ln_f(
             x
         )  # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
@@ -720,8 +727,12 @@ class LagLlamaModel(nn.Module):
         Has to be called after prediction loop in predictor
         """
         self.y_cache = False 
-        for block in self.transformer.h:
-            block.self_attn.kv_cache = None
-            block.self_attn.cached_seq_len = 0
-            block.cross_attn.kv_cache = None
-            block.cross_attn.cached_seq_len = 0
+        for encoder_block in self.transformer.encoder:
+            encoder_block.self_attn.kv_cache = None
+            encoder_block.self_attn.cached_seq_len = 0
+
+        for decoder_block in self.transformer.decoder:
+            decoder_block.self_attn.kv_cache = None
+            decoder_block.self_attn.cached_seq_len = 0
+            decoder_block.cross_attn.kv_cache = None
+            decoder_block.cross_attn.cached_seq_len = 0
