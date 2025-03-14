@@ -62,8 +62,8 @@ class RobustScaler(Scaler):
             iqr = q3 - q1
 
             # Compute full range as a fallback if IQR is 0
-            data_min = torch.nanmin(observed_data, dim=self.dim, keepdim=True).values
-            data_max = torch.nanmax(observed_data, dim=self.dim, keepdim=True).values
+            data_min = torch.nanquantile(observed_data, 0, dim=self.dim, keepdim=True).values
+            data_max = torch.nanquantile(observed_data, 1, dim=self.dim, keepdim=True).values
             full_range = data_max - data_min
 
             # if observed data is all zeros, nanmedian returns nan
